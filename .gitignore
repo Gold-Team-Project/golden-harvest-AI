@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python build / distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+*.log
+
+# OS (Windows / Mac)
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+# FastAPI / Uvicorn
+*.pid
+
+# Generated files (IMPORTANT)
+# 엑셀 / 문서 자동 생성 결과물
+*.xlsx
+*.xls
+*.csv
+
+# PDF 등 문서 생성 시
+*.pdf
+
+# AI / Cache / Temp
+.cache/
+tmp/
+temp/
+
+# Coverage / Test
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Node (혹시 프론트 같이 있을 때)
+node_modules/
+dist/
