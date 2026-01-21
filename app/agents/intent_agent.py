@@ -1,55 +1,41 @@
-# app/agents/intent_agent.py
 from datetime import date
-from app.schemas.intent import DocumentIntent
-from app.schemas.documents import DocumentType
-from app.config import USE_LLM
-from app.agents.gemini_client import generate_text
-import json
+from langchain_core.prompts import ChatPromptTemplate
+from app.config import llm, USE_LLM
+from app.schemas.documents import DocumentType, DocumentIntent
+
+
+def get_fallback_intent(user_message: str) -> DocumentIntent:
+    today = date.today()
+    dtype = DocumentType.INBOUND
+
+    if "출고" in user_message:
+        dtype = DocumentType.OUTBOUND
+    elif "발주" in user_message:
+        dtype = DocumentType.PURCHASE_ORDER
+    elif "주문" in user_message:
+        dtype = DocumentType.ORDER_SHEET
+
+    fmt = "pdf" if dtype in [DocumentType.PURCHASE_ORDER, DocumentType.ORDER_SHEET] else "excel"
+
+    return DocumentIntent(document_type=dtype, start_date=today, end_date=today, format=fmt)
 
 
 def parse_intent(user_message: str) -> DocumentIntent:
-    # 🔒 기본 Mock (fallback)
-    fallback_intent = DocumentIntent(
-        document_type=DocumentType.INBOUND,
-        start_date=date(2026, 1, 10),
-        end_date=date(2026, 1, 17),
-        format="excel"
-    )
-
     if not USE_LLM:
-        return fallback_intent
+        return get_fallback_intent(user_message)
 
     try:
-        prompt = f"""
-너는 ERP 문서 요청을 분석하는 역할이다.
-반드시 JSON만 반환해라. 마크다운 코드 블록(```json) 없이 순수 JSON 텍스트만 출력해.
+        # Pydantic 객체로 바로 구조화된 출력 요청
+        structured_llm = llm.with_structured_output(DocumentIntent)
 
-형식:
-{{
-  "document_type": "INBOUND",
-  "start_date": "YYYY-MM-DD",
-  "end_date": "YYYY-MM-DD",
-  "format": "excel"
-}}
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "너는 ERP 문서 요청 분석가다. 오늘 날짜는 {today}다. 사용자의 요청을 분석하여 정확한 데이터를 추출해라."),
+            ("human", "{text}"),
+        ])
 
-사용자 요청:
-{user_message}
-"""
-        # Client에서 3회 재시도 후 결과 반환
-        text = generate_text(prompt)
-
-        # JSON 파싱 (마크다운 방어 로직 추가)
-        clean_text = text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_text)
-
-        return DocumentIntent(
-            document_type=DocumentType[data["document_type"]],
-            start_date=date.fromisoformat(data["start_date"]),
-            end_date=date.fromisoformat(data["end_date"]),
-            format=data.get("format", "excel")
-        )
+        chain = prompt | structured_llm
+        return chain.invoke({"today": date.today(), "text": user_message})
 
     except Exception as e:
-        # Client에서 429로 3번 실패했거나, JSON 파싱이 터진 경우 모두 여기서 처리
-        print("⚠️ LLM 실패 → fallback 사용:", e)
-        return fallback_intent
+        print(f"⚠️ Intent Error: {e}")
+        return get_fallback_intent(user_message)

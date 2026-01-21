@@ -1,54 +1,57 @@
-# app/main.py
-from fastapi import FastAPI, HTTPException
+import urllib.parse
+from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
-import uuid
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
 from app.agents.intent_agent import parse_intent
 from app.agents.wording_agent import generate_description
-from app.renderers.excel_renderer import render_excel
-from app.services.data_service import get_inbound_data
-from app.services.document_service import build_inbound_document
-from app.templates.inbound_excel import INBOUND_COLUMNS
-from fastapi.responses import FileResponse
-app = FastAPI()
+from app.services.document_service import create_document
 
-# 아주 단순한 메모리 저장 (지금 단계에서는 충분)
+app = FastAPI()
 DOCUMENT_STORE = {}
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.post("/documents")
-def create_document(user_message: str):
-    intent = parse_intent(user_message)
 
-    if not intent or not intent.start_date or not intent.end_date:
-        raise HTTPException(422, "기간 정보를 해석하지 못했습니다.")
+class ChatRequest(BaseModel):
+    message: str
 
-    data = get_inbound_data(intent.start_date, intent.end_date)
-    rows = build_inbound_document(data)
 
-    file_name = f"inbound_{intent.start_date}_{intent.end_date}.xlsx"
-    file_path = render_excel(INBOUND_COLUMNS, rows, file_name)
+@app.post("/chat")
+def chat_endpoint(request: ChatRequest):
+    intent = parse_intent(request.message)
+    print(f"DEBUG Intent: {intent}")
 
-    doc_id = str(uuid.uuid4())
-    DOCUMENT_STORE[doc_id] = file_path
+    doc_result = create_document(intent)
+
+    # 메모리 저장 (실무에선 DB/S3 사용 권장)
+    DOCUMENT_STORE[doc_result["document_id"]] = doc_result
 
     description = generate_description(intent)
 
     return {
         "message": description,
-        "document_id": doc_id,
-        "download_url": f"/documents/{doc_id}/file"
+        "document_id": doc_result["document_id"],
+        "download_url": doc_result["download_url"],
+        "mime_type": doc_result["mime_type"]
     }
 
 
-@app.get("/documents/{doc_id}/file")
+@app.get("/documents/{doc_id}/download")
 def download_document(doc_id: str):
-    file_path = DOCUMENT_STORE.get(doc_id)
+    file_data = DOCUMENT_STORE.get(doc_id)
+    if not file_data:
+        return JSONResponse(status_code=404, content={"error": "File not found"})
 
-    if not file_path:
-        raise HTTPException(404, "문서를 찾을 수 없습니다.")
-
-    return FileResponse(
-        path=file_path,
-        filename=file_path,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    encoded_name = urllib.parse.quote(file_data["filename"])
+    return Response(
+        content=file_data["file_content"],
+        media_type=file_data["mime_type"],
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"}
     )
