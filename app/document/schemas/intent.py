@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import date
-from app.schemas.documents import DocumentType
+from app.document.schemas.documents import DocumentType
 
 class DocumentIntent(BaseModel):
     document_type: DocumentType
