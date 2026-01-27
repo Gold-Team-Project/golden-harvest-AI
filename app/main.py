@@ -1,15 +1,21 @@
 import urllib.parse
-from fastapi import FastAPI, Response
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.agents.intent_agent import parse_intent
 from app.agents.wording_agent import generate_description
-from app.services.document_service import create_document
+from app.document.schemas.documents import ForecastIntent, DocumentIntent
+from app.document.services.document_service import create_document
+from app.forecast.routers.forecast_router import router as forecast_router
+from app.forecast.services.demand_forecast_service import run_demand_forecast
+from app.config import llm
 
 app = FastAPI()
+app.include_router(forecast_router)
+
 DOCUMENT_STORE = {}
+LAST_FORECAST = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,20 +32,76 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 def chat_endpoint(request: ChatRequest):
     intent = parse_intent(request.message)
-    print(f"DEBUG Intent: {intent}")
 
-    doc_result = create_document(intent)
+    if isinstance(intent, ForecastIntent):
+        forecast_result = run_demand_forecast(
+            sku_no=intent.skuNo,
+            start_date=intent.start_date,
+            end_date=intent.end_date,
+            horizon_months=intent.horizon_months
+        )
 
-    # 메모리 저장 (실무에선 DB/S3 사용 권장)
-    DOCUMENT_STORE[doc_result["document_id"]] = doc_result
+        LAST_FORECAST[intent.skuNo] = forecast_result
 
-    description = generate_description(intent)
+        monthly = [
+            {"month": row["ds"].month, "quantity": int(round(row["yhat"]))}
+            for row in forecast_result.get("forecast", [])
+        ]
+
+        message = generate_description(
+            intent=intent,
+            forecast_data={
+                "sku": intent.skuNo,
+                "monthly_forecast": monthly
+            }
+        )
+
+        return {
+            "type": "FORECAST",
+            "message": message,
+            "data": forecast_result
+        }
+
+    if isinstance(intent, DocumentIntent):
+        doc = create_document(intent)
+        DOCUMENT_STORE[doc["document_id"]] = doc
+
+        return {
+            "type": "DOCUMENT",
+            "message": generate_description(intent),
+            "document_id": doc["document_id"],
+            "download_url": doc["download_url"],
+            "mime_type": doc["mime_type"]
+        }
+
+    msg = request.message
+
+    if any(k in msg for k in ["왜", "이유", "근거", "설명"]):
+        if LAST_FORECAST:
+            last = list(LAST_FORECAST.values())[-1]
+
+            explanation = llm.invoke(
+                f"""
+너는 ERP 시스템의 수요 예측 설명 AI다.
+모델 이름이나 알고리즘은 언급하지 마라.
+과거 출고 패턴과 계절성 관점에서
+아래 예측 결과가 왜 이렇게 나왔는지 설명해라.
+
+[예측 결과]
+{last}
+"""
+            ).content
+
+            return {
+                "type": "CHAT",
+                "message": explanation
+            }
+
+    response = llm.invoke(msg)
 
     return {
-        "message": description,
-        "document_id": doc_result["document_id"],
-        "download_url": doc_result["download_url"],
-        "mime_type": doc_result["mime_type"]
+        "type": "CHAT",
+        "message": response.content
     }
 
 
@@ -47,11 +109,13 @@ def chat_endpoint(request: ChatRequest):
 def download_document(doc_id: str):
     file_data = DOCUMENT_STORE.get(doc_id)
     if not file_data:
-        return JSONResponse(status_code=404, content={"error": "File not found"})
+        raise HTTPException(status_code=404)
 
-    encoded_name = urllib.parse.quote(file_data["filename"])
     return Response(
-        content=file_data["file_content"],
+        content=file_data["content"],
         media_type=file_data["mime_type"],
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"}
+        headers={
+            "Content-Disposition":
+                f"attachment; filename*=UTF-8''{urllib.parse.quote(file_data['filename'])}"
+        }
     )
