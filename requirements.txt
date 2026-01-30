@@ -1,0 +1,12 @@
+langchain-core
+langchain-postgres
+langchain-community
+langchain-google-genai  # 임베딩 생성용 (필수)
+psycopg2-binary
+pypdf                   # PDF 파싱
+python-dotenv
+
+langchain-community
+langchain-postgres
+psycopg2-binary
+pypdf

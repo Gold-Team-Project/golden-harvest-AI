@@ -1,6 +1,5 @@
 # app/services/forecast/feature_builder.py
 import pandas as pd
-from datetime import date
 from typing import List, Dict
 
 
@@ -9,8 +8,8 @@ def outbounds_to_monthly_y(rows: List[Dict]) -> pd.DataFrame:
         return pd.DataFrame(columns=["ds", "y"])
 
     df = pd.DataFrame(rows)
-    df["outboundDate"] = pd.to_datetime(df["outboundDate"])
-    df["ds"] = df["outboundDate"].dt.to_period("M").dt.to_timestamp()
+    df["outbound_date"] = pd.to_datetime(df["outbound_date"])
+    df["ds"] = df["outbound_date"].dt.to_period("M").dt.to_timestamp()
     df["y"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0)
 
     monthly = df.groupby("ds")["y"].sum().reset_index()

@@ -7,7 +7,7 @@ from app.config import (
     WEATHER_LAT, WEATHER_LON, WEATHER_TIMEZONE,
     FORECAST_DEFAULT_HORIZON_MONTHS
 )
-from app.forecast.services.outbound_history import fetch_outbounds_from_java
+from app.forecast.services.outbound_history import fetch_outbound_history_by_sku
 from app.forecast.services.weather_open_meteo import (
     fetch_daily_weather, to_monthly_features, build_future_weather_by_climatology
 )
@@ -42,7 +42,7 @@ def run_demand_forecast(
     print(f">>> [Forecast] Training with: {history_start}~{history_end}")
     # =========================================================
 
-    rows = fetch_outbounds_from_java(sku_no, history_start, history_end)
+    rows = fetch_outbound_history_by_sku(sku_no, history_start, history_end)
 
     monthly_y = outbounds_to_monthly_y(rows)
 
