@@ -16,7 +16,7 @@ class DocumentIntent(BaseModel):
     intent_type: Literal["DOCUMENT"] = Field("DOCUMENT", description="의도 타입 (문서 생성)")
 
     document_type: DocumentType = Field(
-        description="문서 종류 (INBOUND:입고, OUTBOUND:출고, PURCHASE_ORDER:발주, ORDER_SHEET:주문서)")
+    description="문서 종류 (INBOUND:입고, OUTBOUND:출고, PURCHASE_ORDER:발주, ORDER_SHEET:주문서)")
     start_date: date = Field(description="조회 시작 날짜 (YYYY-MM-DD)")
     end_date: date = Field(description="조회 종료 날짜 (YYYY-MM-DD)")
     format: str = Field("excel", description="파일 포맷 (excel 또는 pdf)")

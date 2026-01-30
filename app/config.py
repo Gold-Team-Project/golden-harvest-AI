@@ -28,7 +28,7 @@ WEATHER_TIMEZONE = os.getenv("WEATHER_TIMEZONE", "Asia/Seoul")
 
 # Java url
 JAVA_API_URL = os.getenv("JAVA_API_URL", "http://localhost:8088")
-
+DB_CONNECTION = os.getenv("DATABASE_URL")
 # 페이징
 JAVA_PAGE_SIZE = int(os.getenv("JAVA_PAGE_SIZE", "50"))
 JAVA_MAX_PAGES = int(os.getenv("JAVA_MAX_PAGES", "50"))
@@ -38,6 +38,6 @@ NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
 
 # 임베딩
 embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001",
+    model="models/gemini-embedding-001",
     google_api_key=GEMINI_API_KEY
 )

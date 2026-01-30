@@ -9,7 +9,7 @@ load_dotenv()
 # 우리가 만든 모듈 임포트
 from app.agents.intent_agent import parse_intent
 from app.agents.wording_agent import generate_description
-from app.schemas.documents import DocumentIntent, DocumentType
+from app.document.schemas.documents import DocumentIntent, DocumentType
 
 
 def test_intent():
