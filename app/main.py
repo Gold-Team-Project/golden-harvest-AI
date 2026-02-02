@@ -1,14 +1,21 @@
 import urllib.parse
+import json
+import redis
+from typing import List, Optional
+
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# LangChain 메시지 객체
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # 에이전트 및 스키마
 from app.agents.intent_agent import parse_intent
 from app.agents.wording_agent import generate_description, generate_rag_chat
 from app.document.schemas.documents import ForecastIntent, DocumentIntent
 
-# 서비스 (문서, 예측, RAG)
+# 서비스
 from app.document.services.document_service import create_document
 from app.forecast.services.demand_forecast_service import run_demand_forecast
 from app.forecast.routers.forecast_router import router as forecast_router
@@ -18,9 +25,14 @@ from app.config import llm
 app = FastAPI()
 app.include_router(forecast_router)
 
-# 메모리 저장소 (간이용)
+# Redis 클라이언트 설정
+redis_client = redis.Redis(
+    host= 'localhost',
+    port=6379,
+    db=0,
+    decode_responses=True)
+
 DOCUMENT_STORE = {}
-LAST_FORECAST = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,68 +43,100 @@ app.add_middleware(
 
 
 class ChatRequest(BaseModel):
+    session_id: str
     message: str
 
 
+# Redis Helper 함수들 (대화 내역 + 예측 데이터)
+
+# 1. 대화 내역 관리
+def get_chat_history(session_id: str, limit: int = 10) -> List:
+    key = f"chat_history:{session_id}"
+    items = redis_client.lrange(key, -limit, -1)
+
+    messages = []
+    for item in items:
+        data = json.loads(item)
+        if data["role"] == "user":
+            messages.append(HumanMessage(content=data["content"]))
+        elif data["role"] == "assistant":
+            messages.append(AIMessage(content=data["content"]))
+    return messages
+
+
+def save_chat_to_redis(session_id: str, user_msg: str, ai_msg: str):
+    key = f"chat_history:{session_id}"
+    redis_client.rpush(key, json.dumps({"role": "user", "content": user_msg}))
+    redis_client.rpush(key, json.dumps({"role": "assistant", "content": ai_msg}))
+    redis_client.expire(key, 3600 * 24)  # 24시간 보관
+
+
+def save_last_forecast(session_id: str, sku: str, data: dict):
+    """최근 수행한 예측 데이터를 사용자 세션별로 저장"""
+    key = f"last_forecast:{session_id}"
+    payload = {
+        "sku": sku,
+        "data": data
+    }
+    redis_client.set(key, json.dumps(payload, default=str))
+    redis_client.expire(key, 3600 * 24)
+
+
+def get_last_forecast(session_id: str) -> Optional[dict]:
+    """저장된 최근 예측 데이터 불러오기"""
+    key = f"last_forecast:{session_id}"
+    data = redis_client.get(key)
+    if data:
+        return json.loads(data)
+    return None
+
+
 def get_search_keyword(sku_no: str) -> str:
-    """
-    SKU 번호를 입력받아, PDF 검색에 유리한 '한글 상품명'을 반환합니다.
-    (PDF에는 SKU 코드가 없고 '사과', '배' 같은 단어만 있기 때문입니다.)
-    """
     sku_map = {
-        # PDF 파일 내용과 잘 매칭되도록 키워드를 풍부하게 설정
-        "SKU-05-04": "사과 후지 과일 전망",
+        "411-05-05": "사과 후지 과일 전망",
         "SKU-01-01": "배 신고 생산량",
         "SKU-02-02": "샤인머스캣 포도 전망",
         "SKU-03-03": "감귤 노지 관측"
     }
-    # 매핑된 게 없으면 기본적으로 SKU 번호나 '농산물' 키워드 반환
     return sku_map.get(sku_no, sku_no)
 
 
 @app.post("/chat")
 def chat_endpoint(request: ChatRequest):
-    # 1. 의도 파악 (Forecast vs Document vs Chat)
-    intent = parse_intent(request.message)
+    session_id = request.session_id
+    user_message = request.message
 
-    # ====================================================
-    # CASE 1: 수요 예측 (Forecast + Prophet + RAG)
-    # ====================================================
+    intent = parse_intent(user_message)
+
+    ai_response_message = ""
+    response_data = {}
+
+    # 수요 예측
     if isinstance(intent, ForecastIntent):
         print(f"🔮 [Step 1] Prophet 예측 실행: {intent.skuNo}")
 
-        # 1. Prophet 예측 (수학적 통계 계산)
         forecast_result = run_demand_forecast(
             sku_no=intent.skuNo,
             start_date=intent.start_date,
             end_date=intent.end_date,
             horizon_months=intent.horizon_months
         )
-        LAST_FORECAST[intent.skuNo] = forecast_result
 
-        # 2. 데이터 요약 (월별 합계만 추려서 LLM에게 전달할 준비)
+        # [수정됨] 전역 변수 대신 Redis에 저장
+        save_last_forecast(session_id, intent.skuNo, forecast_result)
+
         monthly = [
             {"month": row["ds"].month, "quantity": int(round(row["yhat"]))}
             for row in forecast_result.get("forecast", [])
         ]
 
-        # 3. RAG 검색 (시장 상황 리포트 검색) ⭐️ 핵심 수정 부분 ⭐️
-        # SKU 코드(SKU-05-04) 대신 '사과 후지...'로 검색어 변경
         search_keyword = get_search_keyword(intent.skuNo)
-        print(f"🔎 [Step 2] RAG 검색어 변경: {intent.skuNo} -> '{search_keyword}'")
-
-        # 검색 실행 (관련된 문서를 벡터 DB에서 찾아옴)
         rag_context = search_general_reports(search_keyword)
 
         if not rag_context:
-            print(f"⚠️ 경고: '{search_keyword}'에 대한 검색 결과가 없습니다.")
-            rag_context = "관련된 시장 리포트가 발견되지 않았습니다. (통계 데이터만 참고하세요)"
-        else:
-            print(f"📝 문서 발견됨! (길이: {len(rag_context)})")
+            rag_context = "관련된 시장 리포트가 발견되지 않았습니다."
 
-        # 4. LLM 말 만들기 (Prophet 데이터 + RAG 정보로 보정된 답변 생성)
-        # 이제 Wording Agent가 '사과 생산량 감소' 정보를 읽고 예측값을 보정합니다.
-        message = generate_description(
+        ai_response_message = generate_description(
             intent=intent,
             forecast_data={
                 "sku": intent.skuNo,
@@ -101,62 +145,79 @@ def chat_endpoint(request: ChatRequest):
             market_context=rag_context
         )
 
-        return {
+        response_data = {
             "type": "FORECAST",
-            "message": message,
+            "message": ai_response_message,
             "data": forecast_result,
             "risk_analysis": rag_context
         }
 
-    # ====================================================
-    # CASE 2: 문서 생성 (입고/출고 내역서)
-    # ====================================================
-    if isinstance(intent, DocumentIntent):
+    # CASE 2: 문서 생성
+    elif isinstance(intent, DocumentIntent):
         doc = create_document(intent)
         DOCUMENT_STORE[doc["document_id"]] = doc
 
-        return {
+        ai_response_message = generate_description(intent)
+
+        response_data = {
             "type": "DOCUMENT",
-            "message": generate_description(intent),
+            "message": ai_response_message,
             "document_id": doc["document_id"],
             "download_url": doc["download_url"],
             "mime_type": doc["mime_type"]
         }
 
-    # ====================================================
-    # CASE 3: 일반 대화 (Chat + Optional RAG)
-    # ====================================================
-    msg = request.message
-
-    # RAG 검색 시도 (일반 대화에서도 문서를 참고하도록)
-    rag_context = search_general_reports(msg)
-
-    # 검색된 문서가 있으면 RAG 챗 모드
-    if rag_context:
-        print(f"📝 RAG 문서 발견 (길이: {len(rag_context)}) -> RAG 챗 모드")
-        response_text = generate_rag_chat(msg, rag_context)
-
-    # 검색된 문서가 없으면 일반 챗 모드
+    # CASE 3: 일반 대화 (Context + Last Forecast)
     else:
-        print("💬 관련 문서 없음 -> 일반 LLM 챗 모드")
+        rag_context = search_general_reports(user_message)
+        history_messages = get_chat_history(session_id)
+        current_msg_obj = HumanMessage(content=user_message)
 
-        # 만약 이전 예측 결과에 대해 꼬리 질문을 한 경우 ("왜 그렇게 나왔어?")
-        if any(k in msg for k in ["왜", "이유", "근거", "설명"]) and LAST_FORECAST:
-            last_key = list(LAST_FORECAST.keys())[-1]
-            last_data = LAST_FORECAST[last_key]
-            explanation = llm.invoke(
-                f"사용자가 방금 예측 결과({last_key})에 대해 '{msg}'라고 물었어. "
-                f"예측 데이터({last_data})를 보고 이유를 친절하게 설명해줘."
-            ).content
-            response_text = explanation
+        if rag_context:
+            # RAG 모드
+            system_prompt = f"다음 문서를 바탕으로 답변하세요:\n{rag_context}"
+            messages_to_send = [SystemMessage(content=system_prompt)] + history_messages + [current_msg_obj]
+            ai_response = llm.invoke(messages_to_send)
+            ai_response_message = ai_response.content
         else:
-            # 완전 일반 대화
-            response_text = llm.invoke(msg).content
+            # 일반 대화 모드
 
-    return {
-        "type": "CHAT",
-        "message": response_text
-    }
+            # [수정됨] Redis에서 최근 예측 데이터 확인
+            last_forecast_info = get_last_forecast(session_id)
+
+            # 꼬리 질문 ("왜?", "이유") 이면서 + 최근 예측 데이터가 있을 때
+            is_followup = any(k in user_message for k in ["왜", "이유", "근거", "설명"])
+
+            if is_followup and last_forecast_info:
+                last_sku = last_forecast_info['sku']
+                last_data = last_forecast_info['data']
+
+                print(f"💬 예측 결과({last_sku})에 대한 꼬리 질문 감지")
+
+                # 예측 데이터를 컨텍스트로 주입
+                context_msg = SystemMessage(
+                    content=f"참고: 사용자는 방금 '{last_sku}' 상품의 예측 결과 데이터를 조회했습니다.\n"
+                            f"데이터: {last_data}\n"
+                            f"이 데이터를 기반으로 사용자의 질문에 답변하세요."
+                )
+                messages_to_send = history_messages + [context_msg, current_msg_obj]
+            else:
+                # 그 외 일반 대화
+                messages_to_send = history_messages + [current_msg_obj]
+
+            ai_response = llm.invoke(messages_to_send)
+            ai_response_message = ai_response.content
+
+        response_data = {
+            "type": "CHAT",
+            "message": ai_response_message
+        }
+
+    # [공통] 대화 내용 저장
+    if ai_response_message:
+        save_chat_to_redis(session_id, user_message, ai_response_message)
+
+    return response_data
 
 
 @app.get("/documents/{doc_id}/download")

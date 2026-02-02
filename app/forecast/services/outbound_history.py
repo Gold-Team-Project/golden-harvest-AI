@@ -1,79 +1,82 @@
-import jaydebeapi
+from __future__ import annotations
+
 import os
 from datetime import date
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+import pymysql
+from pymysql.cursors import DictCursor
 
 
-H2_JAR_PATH = r"C:\Users\rbwls\h2/bin\h2-2.2.224.jar"
+def _require_env(name: str) -> str:
+    v = os.getenv(name)
+    if v is None or v == "":
+        raise RuntimeError(f"{name} is missing in environment.")
+    return v
 
-DB_URL = "jdbc:h2:tcp://localhost/~/test2"
-DB_USER = "sa"
-DB_PASSWORD = ""
-DB_DRIVER = "org.h2.Driver"
+
+def _db_cfg() -> Dict[str, Any]:
+    return {
+        "host": _require_env("MDB_HOST"),
+        "port": int(_require_env("MDB_PORT")),
+        "database": _require_env("MDB_DBNAME"),
+        "user": _require_env("MDB_USER"),
+        "password": _require_env("MDB_PASSWORD"),
+    }
+
+
+def get_db_connection() -> pymysql.connections.Connection:
+    cfg = _db_cfg()
+    return pymysql.connect(
+        host=cfg["host"],
+        port=cfg["port"],
+        user=cfg["user"],
+        password=cfg["password"],
+        database=cfg["database"],
+        charset="utf8mb4",
+        cursorclass=DictCursor,
+        autocommit=False,
+    )
 
 
 def fetch_outbound_history_by_sku(
     sku_no: str,
     start_date: date,
     end_date: date,
-    lot_no: Optional[str] = None
-) -> List[Dict]:
-    """
-    SKU 기준 출고 이력을 조회합니다.
-    (Java OutboundMapper.findAllOutbounds 쿼리 구조를 그대로 따름)
-    """
-
-    if not os.path.exists(H2_JAR_PATH):
-        return []
-
+    lot_no: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     sql = """
         SELECT
-            o.outbound_date   AS "outboundDate",
-            o.quantity        AS "quantity",
-            o.outbound_price  AS "outboundPrice",
-            l.sku_no          AS "skuNo",
-            o.lot_no          AS "lotNo"
+            o.outbound_date   AS outboundDate,
+            o.quantity        AS quantity,
+            o.outbound_price  AS outboundPrice,
+            l.sku_no          AS skuNo,
+            o.lot_no          AS lotNo
         FROM tb_outbound o
         JOIN tb_lot l
           ON o.lot_no = l.lot_no
-        WHERE l.sku_no = ?
-          AND o.outbound_date BETWEEN ? AND ?
+        WHERE l.sku_no = %s
+          AND o.outbound_date BETWEEN %s AND %s
     """
 
-    params = [sku_no, str(start_date), str(end_date)]
+    params: List[Any] = [sku_no, start_date, end_date]
 
     if lot_no:
-        sql += " AND o.lot_no = ?"
+        sql += " AND o.lot_no = %s"
         params.append(lot_no)
 
     sql += " ORDER BY o.outbound_date"
 
-    conn = None
-    cursor = None
-
+    conn: Optional[pymysql.connections.Connection] = None
     try:
-        conn = jaydebeapi.connect(
-            DB_DRIVER,
-            DB_URL,
-            [DB_USER, DB_PASSWORD],
-            H2_JAR_PATH
-        )
-        cursor = conn.cursor()
-
-        cursor.execute(sql, params)
-
-        columns = [col[0].lower() for col in cursor.description]
-        rows = cursor.fetchall()
-
-        result = [dict(zip(columns, row)) for row in rows]
-
-        return result
-
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()  # list[dict]
     except Exception as e:
+        print(f"DB Error(fetch_outbound_history_by_sku): {e}")
         return []
-
     finally:
-        if cursor:
-            cursor.close()
         if conn:
             conn.close()
+

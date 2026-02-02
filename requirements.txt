@@ -1,12 +1,20 @@
-langchain-core
-langchain-postgres
-langchain-community
-langchain-google-genai  # 임베딩 생성용 (필수)
-psycopg2-binary
-pypdf                   # PDF 파싱
+fastapi
+uvicorn
+pydantic
 python-dotenv
-
+langchain
+langchain-core
 langchain-community
+langchain-google-genai
 langchain-postgres
-psycopg2-binary
-pypdf
+psycopg[binary]
+pgvector
+pandas
+prophet
+openpyxl
+reportlab
+requests
+python-dateutil
+pymysql
+redis
+redis langchain-core

@@ -8,9 +8,7 @@ from app.config import llm, USE_LLM
 from app.document.schemas.documents import DocumentIntent, ForecastIntent, DocumentType
 
 
-# ----------------------------------------------------------------
 # 1. 의도 파악 (Intent Parsing) 섹션
-# ----------------------------------------------------------------
 
 class UnifiedIntentParsing(BaseModel):
     intent_category: Literal["FORECAST", "DOCUMENT", "CHAT"]
