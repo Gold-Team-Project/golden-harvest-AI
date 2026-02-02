@@ -46,13 +46,3 @@ def ingest_pdf_report(file_path: str, category: str, report_date: str):
         use_jsonb=True,
     )
     print("성공\n")
-
-
-if __name__ == "__main__":
-    sample_pdf = "data/2025_08_apple_report.pdf"
-
-    if os.path.exists(sample_pdf):
-        ingest_pdf_report(sample_pdf, category="사과", report_date="2025-08")
-    else:
-        print(f"❌ 파일을 찾을 수 없습니다: {sample_pdf}")
-        print("테스트를 위해 data 폴더에 PDF를 넣거나 경로를 수정해주세요.")

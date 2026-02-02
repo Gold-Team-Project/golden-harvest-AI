@@ -1,12 +1,11 @@
 # app/rag/service.py
 from app.rag.store import get_vector_store
 
-# SKU 매핑 테이블 (실제로는 DB에서 관리 권장)
+
 SKU_MAPPER = {
     "411": "사과",
     "412": "배",
     "413": "배추",
-    # 테스트용 SKU가 있다면 여기에 추가하세요
 }
 
 
