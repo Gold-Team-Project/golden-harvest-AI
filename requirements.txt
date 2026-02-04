@@ -17,4 +17,6 @@ requests
 python-dateutil
 pymysql
 redis
-redis langchain-core
+python-multipart
+asyncmy
+pytest
