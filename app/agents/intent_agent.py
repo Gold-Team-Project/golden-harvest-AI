@@ -72,14 +72,11 @@ def parse_intent(user_message: str):
         return {"intent_type": "CHAT", "message": user_message, "sku_no": result.sku_no}
 
     except Exception as e:
-        print(f"Intent Parsing Error: {e}");
+        print(f"Intent Parsing Error: {e}")
         return get_fallback_intent(user_message)
 
 
-# ----------------------------------------------------------------
 # 2. 결과 생성 및 보정 (Generation & Calibration) 섹션
-# ----------------------------------------------------------------
-
 def generate_description(intent, forecast_data: dict | None = None, market_context: str = "") -> str:
     if not USE_LLM:
         return "요청하신 작업을 완료했습니다."
