@@ -5,7 +5,7 @@ import hashlib
 import os
 import re
 from datetime import datetime
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple
 
 try:
     import psycopg  # psycopg3
@@ -22,7 +22,7 @@ from langchain_postgres import PGVector
 from app.config import embeddings, DB_CONNECTION
 from app.rag.store import DEFAULT_COLLECTION
 from app.rag.tagger import (
-    load_item_and_variety_aliases,
+    load_item_and_variety_aliases_async,
     detect_item_tags,
     detect_variety_tags,
 )
@@ -34,14 +34,39 @@ from app.rag.tagger import (
 def _require_psycopg():
     if psycopg is None:
         raise RuntimeError(
-            "psycopg(또는 psycopg2)가 필요합니다. "
-            "pip install psycopg[binary] 또는 pip install psycopg2-binary"
+            "psycopg(또는 psycopg2)가 필요합니다."
         )
 
 
 def get_pg_conn():
     _require_psycopg()
-    return psycopg.connect(DB_CONNECTION)
+    # psycopg.connect는 순수 postgresql:// 스키마만 지원하므로 변환
+    raw_conn_str = DB_CONNECTION.replace("+psycopg2", "").replace("+psycopg", "")
+    return psycopg.connect(raw_conn_str)
+
+
+# ✅ [추가] 테이블 초기화 함수
+def init_registry_table():
+    conn = get_pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS rag_ingestion_registry (
+                    collection_name VARCHAR(255) NOT NULL,
+                    file_hash       VARCHAR(255) NOT NULL,
+                    file_name       VARCHAR(255),
+                    category        VARCHAR(255),
+                    period          VARCHAR(255),
+                    source          VARCHAR(255),
+                    status          VARCHAR(50),
+                    error           TEXT,
+                    ingested_at     TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (collection_name, file_hash)
+                );
+            """)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def sha256_file(path: str) -> str:
@@ -166,7 +191,7 @@ def delete_vectors_by_doc_id(collection_name: str, doc_id: str):
 
 
 # -----------------------------
-# Chunking: Section-aware split
+# Chunking
 # -----------------------------
 _HEADING_RE = re.compile(
     r"(^\s*(?:\d+\.\s+|[IVX]+\.\s+|■\s+|▶\s+|○\s+|◇\s+|\[\s*.+?\s*\])\S.*$)",
@@ -178,7 +203,6 @@ def split_by_headings(text: str) -> List[Tuple[str, str]]:
     matches = list(_HEADING_RE.finditer(text))
     if not matches:
         return [("", text)]
-
     sections: List[Tuple[str, str]] = []
     for i, m in enumerate(matches):
         start = m.start()
@@ -195,36 +219,30 @@ def build_chunks_from_pages(raw_documents, chunk_size=1200, chunk_overlap=150):
         chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", " ", ""],
     )
-
     chunks = []
     for page_doc in raw_documents:
         page_text = (page_doc.page_content or "").strip()
         if not page_text:
             continue
-
         page_no = page_doc.metadata.get("page", None)
         sections = split_by_headings(page_text)
-
         for section_title, section_text in sections:
             if len(section_text) > 8000:
                 section_text = section_text[:8000]
-
             sub_docs = splitter.create_documents([section_text], metadatas=[page_doc.metadata])
             for d in sub_docs:
                 d.metadata["section_title"] = section_title
                 d.metadata["page"] = page_no
                 chunks.append(d)
-
     for idx, d in enumerate(chunks):
         d.metadata["chunk_id"] = str(idx)
-
     return chunks
 
 
 # -----------------------------
-# Main ingest function
+# Main ingest function (Async)
 # -----------------------------
-def ingest_pdf_report(
+async def ingest_pdf_report(
     file_path: str,
     category: Optional[str],
     report_date: Optional[str],
@@ -246,8 +264,7 @@ def ingest_pdf_report(
             "reason": "already_ingested",
         }
 
-    # ✅ URL 필요 없음. ENV/내장 fallback 기반 aliases 로드
-    item_aliases, variety_aliases = load_item_and_variety_aliases()
+    item_aliases, variety_aliases = await load_item_and_variety_aliases_async()
 
     try:
         if force:
@@ -271,7 +288,6 @@ def ingest_pdf_report(
             d.metadata["file_hash"] = file_hash
             d.metadata["doc_id"] = doc_id
             d.metadata["ingested_at"] = ingested_at
-
             d.metadata["item_tags"] = item_tags
             d.metadata["variety_tags"] = variety_tags
 

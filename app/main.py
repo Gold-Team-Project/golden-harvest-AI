@@ -1,4 +1,4 @@
-# main.py
+# app/main.py
 import os
 import urllib.parse
 import json
@@ -12,31 +12,27 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel
 
-# LangChain 메시지 객체
+# LangChain
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-# 에이전트 및 스키마
+# Agent & Schema
 from app.agents.intent_agent import parse_intent
 from app.agents.wording_agent import generate_description
 from app.document.schemas.documents import ForecastIntent, DocumentIntent
 
-# 서비스
+# Service
 from app.document.services.document_service import create_document
 from app.forecast.services.demand_forecast_service import run_demand_forecast
 from app.forecast.routers.forecast_router import router as forecast_router
 from app.rag.service import get_expert_insight, search_general_reports
-from app.rag.ingest import ingest_pdf_report
+
+# ✅ [추가] init_registry_table import 확인
+from app.rag.ingest import ingest_pdf_report, init_registry_table
 from app.config import llm
 
-# -----------------------------
-# 로깅 설정 (초기 데이터 적재 과정 확인용)
-# -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# -----------------------------
-# Redis 클라이언트 설정
-# -----------------------------
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
@@ -50,58 +46,59 @@ redis_client = redis.Redis(
 
 DOCUMENT_STORE = {}
 
-
 # -----------------------------
-# Lifespan (수명 주기) 설정: Method B - 초기 데이터 자동 적재
+# Lifespan
 # -----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # [시작 시 실행] seeds 폴더 확인 및 학습
-    seed_dir = "./seeds"  # Docker 내부 경로 기준 (/app/seeds)
+    # ✅ [1단계] 서버 시작 시 테이블 자동 생성 (동기 함수지만 1회성이라 바로 호출)
+    try:
+        init_registry_table()
+        logger.info("✅ [DB Init] RAG 레지스트리 테이블 확인/생성 완료.")
+    except Exception as e:
+        logger.error(f"❌ [DB Init] 테이블 생성 실패: {e}")
+
+    # [2단계] seeds 데이터 학습
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    seed_dir_candidate_1 = "/app/seeds"
+    seed_dir_candidate_2 = os.path.join(current_dir, "seeds")
+    seed_dir = seed_dir_candidate_1 if os.path.exists(seed_dir_candidate_1) else seed_dir_candidate_2
 
     if os.path.exists(seed_dir):
         pdf_files = glob.glob(os.path.join(seed_dir, "*.pdf"))
 
         if pdf_files:
-            logger.info(f"🌱 [초기 데이터] {len(pdf_files)}개의 시드 파일을 발견했습니다. 학습을 시작합니다...")
+            logger.info(f"🌱 [초기 데이터] {len(pdf_files)}개의 파일을 발견했습니다. 학습을 시작합니다...")
 
             for pdf_path in pdf_files:
                 filename = os.path.basename(pdf_path)
                 try:
                     logger.info(f"   Targeting: {filename}")
 
-                    # 동기 함수인 경우 직접 호출 (비동기라면 await 필요)
-                    ingest_pdf_report(
+                    await ingest_pdf_report(
                         file_path=pdf_path,
-                        category="기본자료",  # 필요에 따라 카테고리 지정
+                        category="기본자료",
                         report_date=None,
-                        source="System_Seed",  # 출처를 시스템 시드로 명시
-                        force=True  # 강제로 덮어쓰기/갱신
+                        source="System_Seed",
+                        force=True
                     )
+
                     logger.info(f"   ✅ 완료: {filename}")
                 except Exception as e:
                     logger.error(f"   ❌ 실패: {filename} - {str(e)}")
 
             logger.info("✨ [초기 데이터] 모든 시드 데이터 학습 완료!")
         else:
-            logger.info("ℹ️ seeds 폴더가 비어있습니다. 초기 학습을 건너뜁니다.")
+            logger.info(f"ℹ️ '{seed_dir}' 폴더가 비어있습니다. 초기 학습을 건너뜁니다.")
     else:
-        logger.warning(f"⚠️ {seed_dir} 폴더를 찾을 수 없습니다. (apps/ai/seeds 폴더를 만들어주세요)")
+        logger.warning(f"⚠️ seeds 폴더를 찾을 수 없습니다.")
 
-    yield  # 애플리케이션 실행
-
-    # [종료 시 실행]
+    yield
     pass
 
 
-# -----------------------------
-# FastAPI 앱 초기화
-# -----------------------------
 app = FastAPI(lifespan=lifespan)
 app.include_router(forecast_router)
-
-
-# CORS Middleware는 게이트웨이가 앞단에 있으므로 제거됨
 
 
 class ChatRequest(BaseModel):
@@ -110,12 +107,11 @@ class ChatRequest(BaseModel):
 
 
 # -----------------------------
-# Redis Helper 함수들
+# Redis Helper
 # -----------------------------
 def get_chat_history(session_id: str, limit: int = 10) -> List:
     key = f"chat_history:{session_id}"
     items = redis_client.lrange(key, -limit, -1)
-
     messages = []
     for item in items:
         try:
@@ -157,15 +153,13 @@ def get_last_forecast(session_id: str) -> Optional[dict]:
 # -----------------------------
 # API Endpoints
 # -----------------------------
-
-# RAG 적재 API
 @app.post("/rag/ingest/pdf")
 async def rag_ingest_pdf(
-        file: UploadFile = File(...),
-        category: Optional[str] = Form(None),
-        report_date: Optional[str] = Form(None),
-        source: str = Form("KREI_관측월보"),
-        force: bool = Query(False),
+    file: UploadFile = File(...),
+    category: Optional[str] = Form(None),
+    report_date: Optional[str] = Form(None),
+    source: str = Form("KREI_관측월보"),
+    force: bool = Query(False),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF 파일만 업로드 가능합니다.")
@@ -179,7 +173,7 @@ async def rag_ingest_pdf(
         raise HTTPException(status_code=500, detail=f"파일 저장 실패: {str(e)}")
 
     try:
-        result = ingest_pdf_report(
+        result = await ingest_pdf_report(
             file_path=tmp_path,
             category=category,
             report_date=report_date,
@@ -194,7 +188,6 @@ async def rag_ingest_pdf(
             pass
 
 
-# 채팅 API
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     session_id = request.session_id
@@ -209,7 +202,6 @@ async def chat_endpoint(request: ChatRequest):
             end_date=intent.end_date,
             horizon_months=intent.horizon_months
         )
-
         save_last_forecast(session_id, intent.skuNo, forecast_result)
 
         monthly = [
@@ -229,7 +221,6 @@ async def chat_endpoint(request: ChatRequest):
             query_month=query_month,
             query_period=None
         )
-
         if not rag_context:
             rag_context = "관련된 시장 리포트가 발견되지 않았습니다."
 
@@ -241,7 +232,6 @@ async def chat_endpoint(request: ChatRequest):
             },
             market_context=rag_context
         )
-
         response_data = {
             "type": "FORECAST",
             "message": ai_response_message,
@@ -252,9 +242,7 @@ async def chat_endpoint(request: ChatRequest):
     elif isinstance(intent, DocumentIntent):
         doc = create_document(intent)
         DOCUMENT_STORE[doc["document_id"]] = doc
-
         ai_response_message = generate_description(intent)
-
         response_data = {
             "type": "DOCUMENT",
             "message": ai_response_message,
@@ -265,7 +253,6 @@ async def chat_endpoint(request: ChatRequest):
 
     else:
         rag_context = search_general_reports(user_message, k=3)
-
         history_messages = get_chat_history(session_id)
         current_msg_obj = HumanMessage(content=user_message)
 
@@ -281,7 +268,6 @@ async def chat_endpoint(request: ChatRequest):
             if is_followup and last_forecast_info:
                 last_sku = last_forecast_info.get("sku")
                 last_data = last_forecast_info.get("data")
-
                 context_msg = SystemMessage(
                     content=(
                         f"참고: 사용자는 방금 '{last_sku}' 상품의 예측 결과 데이터를 조회했습니다.\n"
@@ -312,7 +298,6 @@ def download_document(doc_id: str):
     file_data = DOCUMENT_STORE.get(doc_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="document not found")
-
     return Response(
         content=file_data["content"],
         media_type=file_data["mime_type"],

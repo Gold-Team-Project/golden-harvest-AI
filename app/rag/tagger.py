@@ -5,14 +5,16 @@ import json
 import os
 import re
 from functools import lru_cache
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 
+# -----------------------------
 # Utils
+# -----------------------------
 def _normalize(s: str) -> str:
     return (s or "").strip()
 
@@ -52,7 +54,7 @@ def _load_aliases_from_env_list(env_key: str) -> Dict[str, List[str]]:
 
 
 # -----------------------------
-# MariaDB (Master Data) - env 기반 inline
+# MariaDB (Master Data)
 # -----------------------------
 def _build_mariadb_dsn_from_env() -> str:
     host = _env("MDB_HOST", "localhost")
@@ -64,7 +66,6 @@ def _build_mariadb_dsn_from_env() -> str:
     extra = _env("MDB_PARAMS")
 
     if not dbname or not user:
-        # tagger는 “없으면 fallback”이 더 낫다(서비스 죽이기보다)
         raise RuntimeError("MDB_DBNAME 또는 MDB_USER 환경변수가 비어있습니다.")
 
     if extra:
@@ -89,32 +90,25 @@ def _get_session_factory():
 
 
 async def _fetch_names(sql: str) -> List[str]:
-    """
-    단일 컬럼 목록을 문자열 리스트로 반환.
-    """
     factory = _get_session_factory()
     async with factory() as session:
         res = await session.execute(text(sql))
         rows = res.fetchall()
         out: List[str] = []
         for r in rows:
-            # row가 tuple 형태
             v = r[0] if r else None
             s = _normalize(str(v) if v is not None else "")
             if s:
                 out.append(s)
-        # 중복 제거(순서 유지)
         return list(dict.fromkeys(out))
 
 
 async def _load_item_names_from_db() -> List[str]:
-    # tb_produce_master: item_name
     sql = "SELECT item_name FROM tb_produce_master WHERE item_name IS NOT NULL AND item_name <> ''"
     return await _fetch_names(sql)
 
 
 async def _load_variety_names_from_db() -> List[str]:
-    # tb_variety: variety_name
     sql = "SELECT variety_name FROM tb_variety WHERE variety_name IS NOT NULL AND variety_name <> ''"
     return await _fetch_names(sql)
 
@@ -123,11 +117,6 @@ async def _load_variety_names_from_db() -> List[str]:
 # Tag detection
 # -----------------------------
 def _detect_tags(text: str, aliases: Dict[str, List[str]]) -> List[str]:
-    """
-    한글은 단어 경계가 애매해서:
-      1) 약한 boundary 정규식
-      2) 포함 체크 fallback
-    """
     t = text or ""
     hits: List[str] = []
 
@@ -135,14 +124,11 @@ def _detect_tags(text: str, aliases: Dict[str, List[str]]) -> List[str]:
         name = _normalize(canonical)
         if not name:
             continue
-
         found = False
         for k in keys:
             key = _normalize(k)
             if not key:
                 continue
-
-            # 약한 boundary (공백/기호 주변)
             try:
                 pat = rf"(^|[\s\[\(\{{<\"'“‘,.;:|/\\\-]){re.escape(key)}($|[\s\]\)\}}>\"'”’,.;:|/\\\-])"
                 if re.search(pat, t):
@@ -150,15 +136,11 @@ def _detect_tags(text: str, aliases: Dict[str, List[str]]) -> List[str]:
                     break
             except Exception:
                 pass
-
             if key in t:
                 found = True
                 break
-
         if found:
             hits.append(name)
-
-    # 중복 제거(순서 유지)
     return list(dict.fromkeys(hits))
 
 
@@ -167,19 +149,7 @@ def _detect_tags(text: str, aliases: Dict[str, List[str]]) -> List[str]:
 # -----------------------------
 async def load_item_and_variety_aliases_async() -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
     """
-    반환: (item_aliases, variety_aliases)
-
-    우선순위:
-      1) ENV JSON
-         - RAG_ITEM_ALIASES_JSON
-         - RAG_VARIETY_ALIASES_JSON
-      2) ENV list
-         - RAG_ITEM_NAMES
-         - RAG_VARIETY_NAMES
-      3) MariaDB 직접 조회
-         - tb_produce_master.item_name
-         - tb_variety.variety_name
-      4) fallback
+    비동기 버전의 태그 로더.
     """
     # 1) ENV JSON
     item_aliases = _load_aliases_from_env_json("RAG_ITEM_ALIASES_JSON")
@@ -196,7 +166,7 @@ async def load_item_and_variety_aliases_async() -> Tuple[Dict[str, List[str]], D
     if item_aliases and variety_aliases:
         return item_aliases, variety_aliases
 
-    # 3) MariaDB 직접 조회(가능하면)
+    # 3) MariaDB (Async)
     try:
         if not item_aliases:
             items = await _load_item_names_from_db()
@@ -210,7 +180,7 @@ async def load_item_and_variety_aliases_async() -> Tuple[Dict[str, List[str]], D
     except Exception:
         pass
 
-    # 4) fallback
+    # 4) Fallback
     if not item_aliases:
         item_aliases = {
             "사과": ["사과", "부사", "홍로", "후지"],
@@ -230,20 +200,6 @@ async def load_item_and_variety_aliases_async() -> Tuple[Dict[str, List[str]], D
         }
 
     return item_aliases, variety_aliases
-
-
-def load_item_and_variety_aliases() -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
-
-    import asyncio
-
-    try:
-        # 일반 CLI/스크립트 환경
-        return asyncio.run(load_item_and_variety_aliases_async())
-    except RuntimeError:
-        # 이미 루프가 도는 환경(예: 주피터/fastapi 내부) 대비
-        # 가장 안전하게는 ingest를 별도 프로세스로 돌리는 것.
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(load_item_and_variety_aliases_async())
 
 
 def detect_item_tags(text: str, item_aliases: Dict[str, List[str]]) -> List[str]:
