@@ -4,16 +4,22 @@ import urllib.parse
 import json
 import redis
 import tempfile
+import glob
+import logging
 from typing import List, Optional
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Response, HTTPException, UploadFile, File, Form, Query
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 # LangChain 메시지 객체
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
 # 에이전트 및 스키마
 from app.agents.intent_agent import parse_intent
 from app.agents.wording_agent import generate_description
 from app.document.schemas.documents import ForecastIntent, DocumentIntent
+
 # 서비스
 from app.document.services.document_service import create_document
 from app.forecast.services.demand_forecast_service import run_demand_forecast
@@ -22,14 +28,18 @@ from app.rag.service import get_expert_insight, search_general_reports
 from app.rag.ingest import ingest_pdf_report
 from app.config import llm
 
+# -----------------------------
+# 로깅 설정 (초기 데이터 적재 과정 확인용)
+# -----------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = FastAPI()
-app.include_router(forecast_router)
-
-# Redis 클라이언트 설정 (환경변수 지원)
+# -----------------------------
+# Redis 클라이언트 설정
+# -----------------------------
 REDIS_HOST = os.getenv("REDIS_HOST")
-REDIS_PORT = int(os.getenv("REDIS_PORT"))
-REDIS_DB = int(os.getenv("REDIS_DB"))
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
 redis_client = redis.Redis(
     host=REDIS_HOST,
@@ -40,12 +50,58 @@ redis_client = redis.Redis(
 
 DOCUMENT_STORE = {}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# -----------------------------
+# Lifespan (수명 주기) 설정: Method B - 초기 데이터 자동 적재
+# -----------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # [시작 시 실행] seeds 폴더 확인 및 학습
+    seed_dir = "./seeds"  # Docker 내부 경로 기준 (/app/seeds)
+
+    if os.path.exists(seed_dir):
+        pdf_files = glob.glob(os.path.join(seed_dir, "*.pdf"))
+
+        if pdf_files:
+            logger.info(f"🌱 [초기 데이터] {len(pdf_files)}개의 시드 파일을 발견했습니다. 학습을 시작합니다...")
+
+            for pdf_path in pdf_files:
+                filename = os.path.basename(pdf_path)
+                try:
+                    logger.info(f"   Targeting: {filename}")
+
+                    # 동기 함수인 경우 직접 호출 (비동기라면 await 필요)
+                    ingest_pdf_report(
+                        file_path=pdf_path,
+                        category="기본자료",  # 필요에 따라 카테고리 지정
+                        report_date=None,
+                        source="System_Seed",  # 출처를 시스템 시드로 명시
+                        force=True  # 강제로 덮어쓰기/갱신
+                    )
+                    logger.info(f"   ✅ 완료: {filename}")
+                except Exception as e:
+                    logger.error(f"   ❌ 실패: {filename} - {str(e)}")
+
+            logger.info("✨ [초기 데이터] 모든 시드 데이터 학습 완료!")
+        else:
+            logger.info("ℹ️ seeds 폴더가 비어있습니다. 초기 학습을 건너뜁니다.")
+    else:
+        logger.warning(f"⚠️ {seed_dir} 폴더를 찾을 수 없습니다. (apps/ai/seeds 폴더를 만들어주세요)")
+
+    yield  # 애플리케이션 실행
+
+    # [종료 시 실행]
+    pass
+
+
+# -----------------------------
+# FastAPI 앱 초기화
+# -----------------------------
+app = FastAPI(lifespan=lifespan)
+app.include_router(forecast_router)
+
+
+# CORS Middleware는 게이트웨이가 앞단에 있으므로 제거됨
 
 
 class ChatRequest(BaseModel):
@@ -54,7 +110,7 @@ class ChatRequest(BaseModel):
 
 
 # -----------------------------
-# Redis Helper 함수들 (대화 내역 + 예측 데이터)
+# Redis Helper 함수들
 # -----------------------------
 def get_chat_history(session_id: str, limit: int = 10) -> List:
     key = f"chat_history:{session_id}"
@@ -69,7 +125,6 @@ def get_chat_history(session_id: str, limit: int = 10) -> List:
             elif data.get("role") == "assistant":
                 messages.append(AIMessage(content=data.get("content", "")))
         except Exception:
-            # 깨진 항목은 무시
             continue
     return messages
 
@@ -99,14 +154,18 @@ def get_last_forecast(session_id: str) -> Optional[dict]:
     return None
 
 
+# -----------------------------
+# API Endpoints
+# -----------------------------
+
 # RAG 적재 API
 @app.post("/rag/ingest/pdf")
 async def rag_ingest_pdf(
-    file: UploadFile = File(...),
-    category: Optional[str] = Form(None),
-    report_date: Optional[str] = Form(None),
-    source: str = Form("KREI_관측월보"),
-    force: bool = Query(False),
+        file: UploadFile = File(...),
+        category: Optional[str] = Form(None),
+        report_date: Optional[str] = Form(None),
+        source: str = Form("KREI_관측월보"),
+        force: bool = Query(False),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF 파일만 업로드 가능합니다.")
@@ -129,7 +188,6 @@ async def rag_ingest_pdf(
         )
         return result
     finally:
-        # 임시 파일 삭제
         try:
             os.remove(tmp_path)
         except Exception:
@@ -169,7 +227,7 @@ async def chat_endpoint(request: ChatRequest):
         rag_context = await get_expert_insight(
             sku_no=intent.skuNo,
             query_month=query_month,
-            query_period=None  # 여기에 "YYYY-MM"를 넘길 수 있으면 best
+            query_period=None
         )
 
         if not rag_context:
@@ -217,14 +275,12 @@ async def chat_endpoint(request: ChatRequest):
             ai_response = llm.invoke(messages_to_send)
             ai_response_message = ai_response.content
         else:
-            # 일반 대화 모드 + 꼬리질문이면 예측 데이터 컨텍스트 주입
             last_forecast_info = get_last_forecast(session_id)
             is_followup = any(k in user_message for k in ["왜", "이유", "근거", "설명"])
 
             if is_followup and last_forecast_info:
                 last_sku = last_forecast_info.get("sku")
                 last_data = last_forecast_info.get("data")
-
 
                 context_msg = SystemMessage(
                     content=(

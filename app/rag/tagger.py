@@ -55,16 +55,6 @@ def _load_aliases_from_env_list(env_key: str) -> Dict[str, List[str]]:
 # MariaDB (Master Data) - env 기반 inline
 # -----------------------------
 def _build_mariadb_dsn_from_env() -> str:
-    """
-    .env:
-      MDB_HOST=localhost
-      MDB_PORT=3306
-      MDB_DBNAME=goldenharvest
-      MDB_USER=...
-      MDB_PASSWORD=...
-      MDB_CHARSET=utf8mb4 (optional)
-      MDB_PARAMS=... (optional)
-    """
     host = _env("MDB_HOST", "localhost")
     port = _env("MDB_PORT", "3306")
     dbname = _env("MDB_DBNAME")
