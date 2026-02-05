@@ -20,3 +20,4 @@ redis
 python-multipart
 asyncmy
 pytest
+psycopg2-binary
