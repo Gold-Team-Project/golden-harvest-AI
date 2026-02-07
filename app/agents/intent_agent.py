@@ -55,10 +55,27 @@ def parse_intent(user_message: str):
 
         if result.intent_category == "FORECAST":
             horizon = result.forecast_horizon or 6
-            if "2026" in user_message: horizon = 12
+            start_date = today
+            
+            # [기간 키워드 기반 Horizon 보정]
+            msg = user_message.replace(" ", "")
+            if "상반기" in msg:
+                horizon = 6
+            elif "하반기" in msg:
+                # 하반기는 보통 7월부터지만, 현재 시점에서 6개월 예측으로 처리하거나
+                # 예: 현재가 1월이면 7~12월 예측이 필요함.
+                # 우선은 단순하게 6개월로 설정. (정교한 로직은 추후 보강)
+                horizon = 6
+            elif "1분기" in msg or "2분기" in msg or "3분기" in msg or "4분기" in msg:
+                horizon = 3
+            elif "연간" in msg or "내년" in msg or "올해" in msg or "전체" in msg:
+                horizon = 12
+            elif "2026" in user_message: # 연도 명시 시 보통 연간
+                horizon = 12
+            
             return ForecastIntent(
                 intent_type="FORECAST", skuNo=result.sku_no or "ALL",
-                start_date=today, end_date=today + timedelta(days=30 * horizon),
+                start_date=start_date, end_date=start_date + timedelta(days=30 * horizon),
                 horizon_months=horizon
             )
 
@@ -95,6 +112,30 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
 """
 
         if isinstance(intent, ForecastIntent):
+            # [데이터 포맷팅] 월별 데이터를 문자열 표로 변환
+            # forecast_data가 리스트라고 가정 (예: [{'ds': '2026-01-31', 'yhat': 300}, ...])
+            monthly_data_str = "데이터 없음"
+            try:
+                if isinstance(forecast_data, list):
+                    lines = []
+                    for item in forecast_data:
+                        # item이 dict인지 객체인지 확인 필요. 여기선 dict로 가정
+                        ds = item.get('ds', 'Unknown Date')
+                        yhat = item.get('yhat', 0)
+                        # 날짜가 datetime일 경우 문자열 변환
+                        if hasattr(ds, 'strftime'):
+                            ds = ds.strftime('%Y-%m')
+                        else:
+                            ds = str(ds)[:7] # YYYY-MM
+                        
+                        lines.append(f"- {ds}: {int(yhat)}개")
+                    monthly_data_str = "\n".join(lines)
+                else:
+                    monthly_data_str = str(forecast_data)
+            except Exception as e:
+                print(f"Data Formatting Error: {e}")
+                monthly_data_str = str(forecast_data)
+
             # [단기 편향 제거 프롬프트 핵심 보강]
             prompt = ChatPromptTemplate.from_template(
                 """
@@ -107,8 +148,10 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
 - **Prophet 계절성 존중**: 리포트에 내년 전체에 대한 명확한 반대 근거가 없다면, Prophet의 계절성 패턴(통계치)을 훼손하지 마라. 특정 달의 이슈를 12개월 전체에 복사/붙여넣기 하는 것은 중대한 분석 오류다.
 
 ### 2. 입력 데이터
-- (A) Prophet 예측치: {forecast}
-- (B) 시장 정보(RAG): {market_context}
+- (A) Prophet 예측치 요약: {forecast}
+- (B) **월별 상세 데이터(중요)**: 
+{monthly_data}
+- (C) 시장 정보(RAG): {market_context}
 
 ### 3. 답변 양식
 
@@ -118,9 +161,8 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
 - 핵심 트렌드와 총 예측량을 요약.
 
 **[2) 월별 상세 예측 데이터]**
-- **필수**: 예측된 모든 달(1월~6월 등)의 수치를 아래 형식으로 빠짐없이 나열하세요.
-  - YYYY-MM: 000개
-  (예: 2026-01: 290개, 2026-02: 310개 ...)
+- **필수**: 위 '월별 상세 데이터' 섹션의 내용을 아래 형식으로 빠짐없이 그대로 나열하세요. 계산하거나 요약하지 마세요.
+{monthly_data}
 - 합계, 평균, 최소/최대값 요약.
 
 **[3) 리포트/시장 근거 기반 해석]**
@@ -133,6 +175,7 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
             )
             return (prompt | llm | StrOutputParser()).invoke({
                 "forecast": str(forecast_data),
+                "monthly_data": monthly_data_str,
                 "market_context": market_context if market_context else "2026년 장기 전망 데이터 위주 참고 요망"
             })
 

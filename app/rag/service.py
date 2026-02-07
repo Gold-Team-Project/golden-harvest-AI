@@ -134,6 +134,8 @@ def search_general_reports(
     max_context_chars: int = 1200,
 ) -> str:
     vector_store = get_vector_store(collection_name=collection_name)
+    # [Debug] 검색 쿼리 로깅
+    print(f"🔍 [RAG Search] Query='{query}', Item='{item_tag}', Variety='{variety_tag}'")
 
     meta_filter: Dict[str, Any] = {}
     if doc_category:
@@ -145,13 +147,21 @@ def search_general_reports(
 
     base_k = max(k * 8, 20)
     docs = _try_similarity_search_with_filter(vector_store, query, k=base_k, meta_filter=meta_filter or None)
+    print(f"   -> Found {len(docs)} documents before tag filtering.")
+
     if not docs:
+        if item_tag:
+            print(f"   -> No documents found for query '{query}' with item_tag '{item_tag}'.")
         return ""
 
     if item_tag or variety_tag:
-        docs = _filter_docs_by_tags(docs, item_tag, variety_tag, k=k)
-        if not docs:
+        filtered_docs = _filter_docs_by_tags(docs, item_tag, variety_tag, k=k)
+        print(f"   -> Found {len(filtered_docs)} documents after tag filtering.")
+        if not filtered_docs:
+            if item_tag:
+                print(f"   -> No documents found after tag filtering for query '{query}' with item_tag '{item_tag}'.")
             return ""
+        docs = filtered_docs
 
     context_list: List[str] = []
     for doc in docs[:k]:
