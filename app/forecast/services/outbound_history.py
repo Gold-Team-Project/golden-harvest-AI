@@ -47,7 +47,7 @@ def fetch_outbound_history_by_sku(
 ) -> List[Dict[str, Any]]:
     sql = """
         SELECT
-            o.outbound_date   AS outboundDate,
+            o.outbound_date   AS outbound_date,
             o.quantity        AS quantity,
             o.outbound_price  AS outboundPrice,
             l.sku_no          AS skuNo,
