@@ -252,33 +252,51 @@ async def chat_endpoint(request: ChatRequest):
         }
 
     else:
-        # 1. 쿼리 확장 (Query Expansion)
-        # 사용자의 짧은 질문("사과 정보는?")을 검색에 유리하게 변환
-        search_query = f"{user_message} 농업관측 전망 생산량 가격 수급 재배면적"
+        # [RAG 검색 개선]
+        # 1. 사용자 질문에서 품목명 추출 시도 (간이 로직)
+        target_item = None
+        for fruit in ["사과", "배", "포도", "감귤", "딸기", "샤인머스캣", "복숭아"]:
+            if fruit in user_message:
+                target_item = fruit
+                break
         
-        # 2. 검색 시도 (확장된 쿼리)
-        rag_context = search_general_reports(search_query, k=5)
-
-        # 3. 검색 결과 없으면, 원본 메시지로 재시도
-        if not rag_context:
-            rag_context = search_general_reports(user_message, k=5)
+        rag_context = ""
+        
+        # 2. 품목명이 있으면 해당 품목 태그로 우선 검색
+        if target_item:
+            print(f"🔍 품목 감지됨: {target_item} -> 태그 필터 검색 시도")
+            # 2-1. 태그 필터 검색
+            rag_context = search_general_reports(f"{target_item} 전망 생산량 가격", k=5, item_tag=target_item)
             
-        # 4. 그래도 없으면, 전체 리포트 내용 탐색 (Fallback)
-        # seeds에 있는 파일 내용을 훑어보기 위해 포괄적인 키워드로 검색
+            # 2-2. 태그로 안 나오면, 쿼리에 품목명 넣어서 태그 없이 검색 (본문 검색 유도)
+            if not rag_context:
+                print(f"⚠️ 태그 검색 실패 -> 텍스트 검색 시도(확장): {target_item}")
+                # k값을 8로 늘려 더 많은 문서를 탐색
+                rag_context = search_general_reports(f"{target_item} 농업관측 전망 수급 동향", k=8)
+        
+        # 3. 품목명이 없거나 검색 실패 시, 기존 방식(쿼리 확장) 사용
+        if not rag_context:
+            search_query = f"{user_message} 농업관측 전망 생산량 가격 수급"
+            rag_context = search_general_reports(search_query, k=5)
+
+        # 4. 최후의 보루: 전체 리포트 검색
         if not rag_context:
              rag_context = search_general_reports("농업관측 월보 전망", k=5)
 
         history_messages = get_chat_history(session_id)
         current_msg_obj = HumanMessage(content=user_message)
-
+        
+        # 5. 시스템 프롬프트 강화
         if rag_context:
             system_prompt = (
-                f"당신은 농산물 시장 분석 전문가입니다. 아래 제공된 [참고 문서]를 바탕으로 사용자의 질문에 답변하세요.\n"
-                f"만약 문서에 사용자가 묻는 과일(예: 사과, 포도 등)에 대한 내용이 있다면 반드시 그 내용을 포함하여 상세히 설명하세요.\n\n"
+                f"당신은 농산물 시장 분석 전문가입니다. 아래 [참고 문서]를 철저히 분석하여 답변하세요.\n"
+                f"사용자가 특정 품목(예: {target_item or '과일'})을 물어봤다면, 문서 내 해당 품목 관련 내용을 모두 찾아 상세히 설명해야 합니다.\n"
+                f"문서에 있는 수치(생산량, 면적 등)를 인용할 때는 '문서에 따르면...'이라고 언급하세요.\n\n"
+                f"만약 문서에 해당 품목에 대한 직접적인 언급이 부족하더라도, 과일 전체의 동향이나 연관 품목의 정보를 바탕으로 합리적인 추론을 제공하세요.\n\n"
                 f"[참고 문서]\n{rag_context}\n\n"
                 f"답변 시 주의사항:\n"
-                f"- '문서에 따르면...'과 같이 출처를 언급하며 신뢰도 있게 답변하세요.\n"
-                f"- 문서에 없는 내용은 지어내지 말고, 정보가 부족하면 부족하다고 솔직히 말하세요."
+                f"- 문서 내용을 최우선으로 하되, 내용이 부족하면 '문서에 직접적인 내용은 없으나...'라고 밝히고 연관 정보를 설명하세요.\n"
+                f"- 추측성 답변보다는 문서에 근거한 사실 위주로 답변하세요."
             )
             messages_to_send = [SystemMessage(content=system_prompt)] + history_messages + [current_msg_obj]
             ai_response = llm.invoke(messages_to_send)
