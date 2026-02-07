@@ -258,7 +258,7 @@ async def get_expert_insight(
     if ctx:
         return ctx
 
-    return search_general_reports(
+    ctx = search_general_reports(
         query=f"{item_name} 수급 전망 작황 가격 관측월보",
         k=3,
         doc_category=None,
@@ -266,6 +266,21 @@ async def get_expert_insight(
         source=None,
         item_tag=item_name,
         variety_tag=None,
+        collection_name=collection_name,
+        max_context_chars=1200,
+    )
+    if ctx:
+        return ctx
+
+    # 3. Fallback: 태그 필터 없이 검색 (문서 내 텍스트 매칭 유도)
+    return search_general_reports(
+        query=f"{item_name} {variety_name or ''} 수급 전망 작황",
+        k=3,
+        doc_category=None,
+        period=query_period,
+        source=None,
+        item_tag=None,  # 태그 필터 제거
+        variety_tag=None, # 태그 필터 제거
         collection_name=collection_name,
         max_context_chars=1200,
     )

@@ -66,7 +66,8 @@ def parse_intent(user_message: str):
             return DocumentIntent(
                 intent_type="DOCUMENT", document_type=result.doc_type or DocumentType.INBOUND,
                 start_date=result.doc_start or (today - timedelta(days=30)),
-                end_date=result.doc_end or today, format="excel"
+                end_date=result.doc_end or today, format="excel",
+                sku_no=result.sku_no
             )
 
         return {"intent_type": "CHAT", "message": user_message, "sku_no": result.sku_no}
@@ -82,6 +83,17 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
         return "요청하신 작업을 완료했습니다."
 
     try:
+        if isinstance(intent, DocumentIntent):
+            target = f"(SKU: {intent.sku_no})" if intent.sku_no else "(전체 품목)"
+            return f"""
+✅ **문서 생성 완료**
+- 기간: {intent.start_date} ~ {intent.end_date}
+- 대상: {target}
+- 유형: {intent.document_type.name}
+
+요청하신 문서를 생성했습니다. 아래 버튼을 클릭하여 다운로드하세요.
+"""
+
         if isinstance(intent, ForecastIntent):
             # [단기 편향 제거 프롬프트 핵심 보강]
             prompt = ChatPromptTemplate.from_template(

@@ -252,12 +252,34 @@ async def chat_endpoint(request: ChatRequest):
         }
 
     else:
-        rag_context = search_general_reports(user_message, k=3)
+        # 1. 쿼리 확장 (Query Expansion)
+        # 사용자의 짧은 질문("사과 정보는?")을 검색에 유리하게 변환
+        search_query = f"{user_message} 농업관측 전망 생산량 가격 수급 재배면적"
+        
+        # 2. 검색 시도 (확장된 쿼리)
+        rag_context = search_general_reports(search_query, k=5)
+
+        # 3. 검색 결과 없으면, 원본 메시지로 재시도
+        if not rag_context:
+            rag_context = search_general_reports(user_message, k=5)
+            
+        # 4. 그래도 없으면, 전체 리포트 내용 탐색 (Fallback)
+        # seeds에 있는 파일 내용을 훑어보기 위해 포괄적인 키워드로 검색
+        if not rag_context:
+             rag_context = search_general_reports("농업관측 월보 전망", k=5)
+
         history_messages = get_chat_history(session_id)
         current_msg_obj = HumanMessage(content=user_message)
 
         if rag_context:
-            system_prompt = f"다음 문서를 바탕으로 답변하세요:\n{rag_context}"
+            system_prompt = (
+                f"당신은 농산물 시장 분석 전문가입니다. 아래 제공된 [참고 문서]를 바탕으로 사용자의 질문에 답변하세요.\n"
+                f"만약 문서에 사용자가 묻는 과일(예: 사과, 포도 등)에 대한 내용이 있다면 반드시 그 내용을 포함하여 상세히 설명하세요.\n\n"
+                f"[참고 문서]\n{rag_context}\n\n"
+                f"답변 시 주의사항:\n"
+                f"- '문서에 따르면...'과 같이 출처를 언급하며 신뢰도 있게 답변하세요.\n"
+                f"- 문서에 없는 내용은 지어내지 말고, 정보가 부족하면 부족하다고 솔직히 말하세요."
+            )
             messages_to_send = [SystemMessage(content=system_prompt)] + history_messages + [current_msg_obj]
             ai_response = llm.invoke(messages_to_send)
             ai_response_message = ai_response.content

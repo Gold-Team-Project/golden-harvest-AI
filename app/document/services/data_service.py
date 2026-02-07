@@ -43,7 +43,7 @@ def get_db_connection() -> pymysql.connections.Connection:
 # =========================
 # DB 조회 (Inbound)
 # =========================
-def fetch_inbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
+def fetch_inbound_from_db(start_date, end_date, sku_no: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     tb_inbound + Master Data 조인
     반환: [{inbound_date, sku_no, quantity, item_name, variety_name, grade_name}, ...]
@@ -62,14 +62,20 @@ def fetch_inbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
         JOIN tb_variety v ON s.item_code = v.item_code AND s.variety_code = v.variety_code
         JOIN tb_grade g ON s.grade_code = g.grade_code
         WHERE i.inbound_date BETWEEN %s AND %s
-        ORDER BY i.inbound_date DESC
     """
+    params = [start_date, end_date]
+
+    if sku_no and sku_no.upper() != "ALL":
+        sql += " AND i.sku_no = %s"
+        params.append(sku_no)
+
+    sql += " ORDER BY i.inbound_date DESC"
 
     conn: Optional[pymysql.connections.Connection] = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cursor:
-            cursor.execute(sql, (start_date, end_date))
+            cursor.execute(sql, params)
             rows = cursor.fetchall()
             print(f"💾 DB 조회(Inbound): {len(rows)}건")
             return rows
@@ -84,7 +90,7 @@ def fetch_inbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
 # =========================
 # DB 조회 (Outbound)
 # =========================
-def fetch_outbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
+def fetch_outbound_from_db(start_date, end_date, sku_no: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     tb_outbound + tb_lot + Master Data 조인
     """
@@ -105,14 +111,20 @@ def fetch_outbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
         JOIN tb_variety v ON s.item_code = v.item_code AND s.variety_code = v.variety_code
         JOIN tb_grade g ON s.grade_code = g.grade_code
         WHERE o.outbound_date BETWEEN %s AND %s
-        ORDER BY o.outbound_date DESC
     """
+    params = [start_date, end_date]
+
+    if sku_no and sku_no.upper() != "ALL":
+        sql += " AND l.sku_no = %s"
+        params.append(sku_no)
+    
+    sql += " ORDER BY o.outbound_date DESC"
 
     conn: Optional[pymysql.connections.Connection] = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cursor:
-            cursor.execute(sql, (start_date, end_date))
+            cursor.execute(sql, params)
             rows = cursor.fetchall()
             print(f"💾 DB 조회(Outbound): {len(rows)}건")
             return rows
@@ -129,8 +141,7 @@ def fetch_outbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
 # =========================
 def get_data_for_intent(intent: DocumentIntent):
     """
-    intent(document_type, start_date, end_date)에 따라
-    DB 조회 후 Excel 생성(build_inbound_excel/build_outbound_excel) 결과 반환
+    intent(document_type, start_date, end_date, sku_no) -> DB 조회 -> Excel
     """
     base_data = {
         "start_date": intent.start_date,
@@ -140,7 +151,7 @@ def get_data_for_intent(intent: DocumentIntent):
 
     # INBOUND
     if intent.document_type == DocumentType.INBOUND:
-        db_rows = fetch_inbound_from_db(intent.start_date, intent.end_date)
+        db_rows = fetch_inbound_from_db(intent.start_date, intent.end_date, sku_no=intent.sku_no)
         items = [
             {
                 "date": row.get("inbound_date"),
@@ -156,7 +167,7 @@ def get_data_for_intent(intent: DocumentIntent):
 
     # OUTBOUND
     if intent.document_type == DocumentType.OUTBOUND:
-        db_rows = fetch_outbound_from_db(intent.start_date, intent.end_date)
+        db_rows = fetch_outbound_from_db(intent.start_date, intent.end_date, sku_no=intent.sku_no)
 
         items: List[Dict[str, Any]] = []
         for row in db_rows:

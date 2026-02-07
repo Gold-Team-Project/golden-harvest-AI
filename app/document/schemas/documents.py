@@ -15,6 +15,7 @@ class DocumentIntent(BaseModel):
     start_date: date = Field(..., description="조회 시작 날짜")
     end_date: date = Field(..., description="조회 종료 날짜")
     format: str = Field("excel", description="파일 포맷 (excel 또는 pdf)")
+    sku_no: Optional[str] = Field(None, description="특정 SKU만 조회하고 싶을 때 사용")
 
 class ForecastIntent(BaseModel):
     intent_type: Literal["FORECAST"] = Field("FORECAST", description="의도 타입 (수요 예측)")
