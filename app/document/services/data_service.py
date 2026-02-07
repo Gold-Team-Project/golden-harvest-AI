@@ -45,15 +45,22 @@ def get_db_connection() -> pymysql.connections.Connection:
 # =========================
 def fetch_inbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
     """
-    tb_inbound에서 기간 내 입고 데이터를 조회
-    반환: [{inbound_date, sku_no, quantity}, ...]
+    tb_inbound + Master Data 조인
+    반환: [{inbound_date, sku_no, quantity, item_name, variety_name, grade_name}, ...]
     """
     sql = """
         SELECT
-            i.inbound_date AS inbound_date,
-            i.sku_no       AS sku_no,
-            i.quantity     AS quantity
+            i.inbound_date   AS inbound_date,
+            i.sku_no         AS sku_no,
+            pm.item_name     AS item_name,
+            v.variety_name   AS variety_name,
+            g.grade_name     AS grade_name,
+            i.quantity       AS quantity
         FROM tb_inbound i
+        JOIN tb_sku s ON i.sku_no = s.sku_no
+        JOIN tb_produce_master pm ON s.item_code = pm.item_code
+        JOIN tb_variety v ON s.item_code = v.item_code AND s.variety_code = v.variety_code
+        JOIN tb_grade g ON s.grade_code = g.grade_code
         WHERE i.inbound_date BETWEEN %s AND %s
         ORDER BY i.inbound_date DESC
     """
@@ -63,7 +70,7 @@ def fetch_inbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
         conn = get_db_connection()
         with conn.cursor() as cursor:
             cursor.execute(sql, (start_date, end_date))
-            rows = cursor.fetchall()  # list[dict]
+            rows = cursor.fetchall()
             print(f"💾 DB 조회(Inbound): {len(rows)}건")
             return rows
     except Exception as e:
@@ -79,18 +86,24 @@ def fetch_inbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
 # =========================
 def fetch_outbound_from_db(start_date, end_date) -> List[Dict[str, Any]]:
     """
-    tb_outbound + tb_lot 조인해서 출고 데이터를 조회
-    반환: [{outbound_date, lot_no, sku_no, quantity, outbound_price}, ...]
+    tb_outbound + tb_lot + Master Data 조인
     """
     sql = """
         SELECT
-            o.outbound_date  AS outbound_date,
-            o.lot_no         AS lot_no,
-            l.sku_no         AS sku_no,
-            o.quantity       AS quantity,
-            o.outbound_price AS outbound_price
+            o.outbound_date   AS outbound_date,
+            o.lot_no          AS lot_no,
+            l.sku_no          AS sku_no,
+            pm.item_name      AS item_name,
+            v.variety_name    AS variety_name,
+            g.grade_name      AS grade_name,
+            o.quantity        AS quantity,
+            o.outbound_price  AS outbound_price
         FROM tb_outbound o
         JOIN tb_lot l ON o.lot_no = l.lot_no
+        JOIN tb_sku s ON l.sku_no = s.sku_no
+        JOIN tb_produce_master pm ON s.item_code = pm.item_code
+        JOIN tb_variety v ON s.item_code = v.item_code AND s.variety_code = v.variety_code
+        JOIN tb_grade g ON s.grade_code = g.grade_code
         WHERE o.outbound_date BETWEEN %s AND %s
         ORDER BY o.outbound_date DESC
     """
@@ -132,6 +145,9 @@ def get_data_for_intent(intent: DocumentIntent):
             {
                 "date": row.get("inbound_date"),
                 "sku": row.get("sku_no"),
+                "item_name": row.get("item_name"),
+                "variety_name": row.get("variety_name"),
+                "grade_name": row.get("grade_name"),
                 "qty": row.get("quantity"),
             }
             for row in db_rows
@@ -152,6 +168,9 @@ def get_data_for_intent(intent: DocumentIntent):
                     "date": row.get("outbound_date"),
                     "LOT": row.get("lot_no"),
                     "sku": row.get("sku_no"),
+                    "item_name": row.get("item_name"),
+                    "variety_name": row.get("variety_name"),
+                    "grade_name": row.get("grade_name"),
                     "qty": qty,
                     "price": price,
                     "amount": qty * price,

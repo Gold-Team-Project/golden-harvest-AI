@@ -39,6 +39,12 @@ def generate_excel(data: dict):
                 row.append(item.get("LOT", ""))
             elif h == "SKU번호":
                 row.append(item.get("sku", ""))
+            elif h == "품목명":
+                row.append(item.get("item_name", ""))
+            elif h == "품종명":
+                row.append(item.get("variety_name", ""))
+            elif h == "등급":
+                row.append(item.get("grade_name", ""))
             elif h == "수량":
                 row.append(item.get("qty", 0))
             elif h == "단가":

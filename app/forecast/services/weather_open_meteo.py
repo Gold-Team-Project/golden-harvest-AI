@@ -53,7 +53,7 @@ def to_monthly_features(daily_df: pd.DataFrame) -> pd.DataFrame:
         precipitation=("precipitation", "sum"),
     ).reset_index()
 
-    monthly = monthly.fillna(method="ffill").fillna(method="bfill")
+    monthly = monthly.ffill().bfill()
     return monthly
 
 
@@ -75,5 +75,5 @@ def build_future_weather_by_climatology(
     fut["month"] = pd.to_datetime(fut["ds"]).dt.month
 
     fut = fut.merge(normals, on="month", how="left").drop(columns=["month"])
-    fut = fut.fillna(method="ffill").fillna(method="bfill")
+    fut = fut.ffill().bfill()
     return fut
