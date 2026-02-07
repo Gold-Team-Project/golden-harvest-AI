@@ -46,6 +46,7 @@ redis_client = redis.Redis(
 
 DOCUMENT_STORE = {}
 
+
 # -----------------------------
 # Lifespan
 # -----------------------------
@@ -155,11 +156,11 @@ def get_last_forecast(session_id: str) -> Optional[dict]:
 # -----------------------------
 @app.post("/rag/ingest/pdf")
 async def rag_ingest_pdf(
-    file: UploadFile = File(...),
-    category: Optional[str] = Form(None),
-    report_date: Optional[str] = Form(None),
-    source: str = Form("KREI_관측월보"),
-    force: bool = Query(False),
+        file: UploadFile = File(...),
+        category: Optional[str] = Form(None),
+        report_date: Optional[str] = Form(None),
+        source: str = Form("KREI_관측월보"),
+        force: bool = Query(False),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="PDF 파일만 업로드 가능합니다.")
@@ -209,6 +210,10 @@ async def chat_endpoint(request: ChatRequest):
             for row in forecast_result.get("forecast", [])
         ]
 
+        # [개선] SKU 정보를 먼저 조회하여 AI에게 정확한 품목명을 전달
+        from app.rag.service import resolve_sku_to_item_and_variety
+        item_name, variety_name, _, _ = await resolve_sku_to_item_and_variety(intent.skuNo)
+
         query_month = None
         try:
             if intent.start_date:
@@ -228,6 +233,8 @@ async def chat_endpoint(request: ChatRequest):
             intent=intent,
             forecast_data={
                 "sku": intent.skuNo,
+                "item_name": item_name or "알 수 없음",
+                "variety_name": variety_name or "전체",
                 "monthly_forecast_summary": monthly
             },
             market_context=rag_context
@@ -259,21 +266,21 @@ async def chat_endpoint(request: ChatRequest):
             if fruit in user_message:
                 target_item = fruit
                 break
-        
+
         rag_context = ""
-        
+
         # 2. 품목명이 있으면 해당 품목 태그로 우선 검색
         if target_item:
             print(f"🔍 품목 감지됨: {target_item} -> 태그 필터 검색 시도")
             # 2-1. 태그 필터 검색
             rag_context = search_general_reports(f"{target_item} 전망 생산량 가격", k=5, item_tag=target_item)
-            
+
             # 2-2. 태그로 안 나오면, 쿼리에 품목명 넣어서 태그 없이 검색 (본문 검색 유도)
             if not rag_context:
                 print(f"⚠️ 태그 검색 실패 -> 텍스트 검색 시도(확장): {target_item}")
                 # k값을 8로 늘려 더 많은 문서를 탐색
                 rag_context = search_general_reports(f"{target_item} 농업관측 전망 수급 동향", k=8)
-        
+
         # 3. 품목명이 없거나 검색 실패 시, 기존 방식(쿼리 확장) 사용
         if not rag_context:
             search_query = f"{user_message} 농업관측 전망 생산량 가격 수급"
@@ -281,11 +288,11 @@ async def chat_endpoint(request: ChatRequest):
 
         # 4. 최후의 보루: 전체 리포트 검색
         if not rag_context:
-             rag_context = search_general_reports("농업관측 월보 전망", k=5)
+            rag_context = search_general_reports("농업관측 월보 전망", k=5)
 
         history_messages = get_chat_history(session_id)
         current_msg_obj = HumanMessage(content=user_message)
-        
+
         # 5. 시스템 프롬프트 강화
         if rag_context:
             system_prompt = (

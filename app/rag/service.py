@@ -20,7 +20,7 @@ def _env(key: str, default: str = "") -> str:
 
 
 def _build_mariadb_dsn_from_env() -> str:
-    host = _env("MDB_HOST" )
+    host = _env("MDB_HOST")
     port = _env("MDB_PORT")
     dbname = _env("MDB_DBNAME")
     user = _env("MDB_USER")
@@ -74,44 +74,34 @@ def _trim_text(s: str, max_chars: int) -> str:
 
 
 def _try_similarity_search_with_filter(vector_store, query: str, k: int, meta_filter: Optional[Dict[str, Any]]):
-    if not meta_filter:
-        return vector_store.similarity_search(query, k=k)
+    # 메타 필터가 있으면 먼저 시도
+    if meta_filter:
+        try:
+            results = vector_store.similarity_search(query, k=k, filter=meta_filter)
+            if results:
+                return results
+        except Exception as e:
+            print(f"⚠️ [RAG] Filter search error (ignored): {e}")
 
-    try:
-        return vector_store.similarity_search(query, k=k, filter=meta_filter)
-    except TypeError:
-        pass
-    except Exception:
-        pass
-
-    docs = vector_store.similarity_search(query, k=max(k * 5, 10))
-    filtered = []
-    for d in docs:
-        ok = True
-        for fk, fv in meta_filter.items():
-            if fv is None:
-                continue
-            if (d.metadata or {}).get(fk) != fv:
-                ok = False
-                break
-        if ok:
-            filtered.append(d)
-        if len(filtered) >= k:
-            break
-    return filtered
+    # 필터 검색 결과가 없거나 실패 시, 일반 유사도 검색 수행
+    return vector_store.similarity_search(query, k=k)
 
 
 def _filter_docs_by_tags(docs: List[Any], item_name: Optional[str], variety_name: Optional[str], k: int) -> List[Any]:
     out: List[Any] = []
     for d in docs:
         md = d.metadata or {}
-        item_tags = md.get("item_tags") or []
-        variety_tags = md.get("variety_tags") or []
+        # metadata 필드명이 다를 수 있으므로 유연하게 체크
+        item_tags = md.get("item_tags") or md.get("item_tag") or []
+        variety_tags = md.get("variety_tags") or md.get("variety_tag") or []
+
+        # 문자열인 경우 리스트로 취급
+        if isinstance(item_tags, str): item_tags = [item_tags]
+        if isinstance(variety_tags, str): variety_tags = [variety_tags]
 
         if item_name:
             if not (isinstance(item_tags, list) and item_name in item_tags):
                 continue
-
         if variety_name:
             if not (isinstance(variety_tags, list) and variety_name in variety_tags):
                 continue
@@ -123,46 +113,46 @@ def _filter_docs_by_tags(docs: List[Any], item_name: Optional[str], variety_name
 
 
 def search_general_reports(
-    query: str,
-    k: int = 3,
-    doc_category: Optional[str] = None,
-    period: Optional[str] = None,
-    source: Optional[str] = None,
-    item_tag: Optional[str] = None,
-    variety_tag: Optional[str] = None,
-    collection_name: str = DEFAULT_COLLECTION,
-    max_context_chars: int = 1200,
+        query: str,
+        k: int = 3,
+        doc_category: Optional[str] = None,
+        period: Optional[str] = None,
+        source: Optional[str] = None,
+        item_tag: Optional[str] = None,
+        variety_tag: Optional[str] = None,
+        collection_name: str = DEFAULT_COLLECTION,
+        max_context_chars: int = 1200,
 ) -> str:
     vector_store = get_vector_store(collection_name=collection_name)
-    # [Debug] 검색 쿼리 로깅
     print(f"🔍 [RAG Search] Query='{query}', Item='{item_tag}', Variety='{variety_tag}'")
 
     meta_filter: Dict[str, Any] = {}
-    if doc_category:
-        meta_filter["doc_category"] = doc_category
-    if period:
-        meta_filter["period"] = period
-    if source:
-        meta_filter["source"] = source
+    if doc_category: meta_filter["doc_category"] = doc_category
+    if period: meta_filter["period"] = period
+    if source: meta_filter["source"] = source
 
-    base_k = max(k * 8, 20)
+    # 더 넓게 검색 (보통 k의 10배 정도)
+    base_k = 30
     docs = _try_similarity_search_with_filter(vector_store, query, k=base_k, meta_filter=meta_filter or None)
-    print(f"   -> Found {len(docs)} documents before tag filtering.")
 
     if not docs:
-        if item_tag:
-            print(f"   -> No documents found for query '{query}' with item_tag '{item_tag}'.")
+        print(f"   -> Found 0 documents in VectorStore for '{query}'. (DB가 비어있을 가능성 있음)")
         return ""
 
+    print(f"   -> Found {len(docs)} documents before tag filtering.")
+
+    # 태그 필터링 시도
     if item_tag or variety_tag:
         filtered_docs = _filter_docs_by_tags(docs, item_tag, variety_tag, k=k)
-        print(f"   -> Found {len(filtered_docs)} documents after tag filtering.")
-        if not filtered_docs:
-            if item_tag:
-                print(f"   -> No documents found after tag filtering for query '{query}' with item_tag '{item_tag}'.")
-            return ""
-        docs = filtered_docs
-
+        if filtered_docs:
+            print(f"   -> Found {len(filtered_docs)} documents after tag filtering.")
+            docs = filtered_docs
+        else:
+            print(f"   -> ⚠️ No match for tags {item_tag}/{variety_tag}. Falling back to top-N results.")
+            # 태그가 안 맞아도 가장 유사한 문서는 상위 3개 그대로 반환 (Fallback)
+            docs = docs[:k]
+    else:
+        docs = docs[:k]
     context_list: List[str] = []
     for doc in docs[:k]:
         md = doc.metadata or {}
@@ -233,12 +223,11 @@ async def resolve_sku_to_item_and_variety(sku_no: str) -> Tuple[str, str, str, s
 
 
 async def get_expert_insight(
-    sku_no: str,
-    query_month: Optional[int] = None,
-    query_period: Optional[str] = None,  # 예: "2025-08"
-    collection_name: str = DEFAULT_COLLECTION,
+        sku_no: str,
+        query_month: Optional[int] = None,
+        query_period: Optional[str] = None,  # 예: "2025-08"
+        collection_name: str = DEFAULT_COLLECTION,
 ) -> str:
-
     item_name, variety_name, _, _ = await resolve_sku_to_item_and_variety(sku_no)
     if not item_name:
         return ""
@@ -290,7 +279,7 @@ async def get_expert_insight(
         period=query_period,
         source=None,
         item_tag=None,  # 태그 필터 제거
-        variety_tag=None, # 태그 필터 제거
+        variety_tag=None,  # 태그 필터 제거
         collection_name=collection_name,
         max_context_chars=1200,
     )

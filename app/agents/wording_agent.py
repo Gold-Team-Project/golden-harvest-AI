@@ -147,15 +147,19 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
             prompt = ChatPromptTemplate.from_template(
                 """
 너는 **수석 수요 예측 분석가(Senior Demand Planner)**다.
-목표: 시스템이 제공한 예측 수치(Prophet 결과 요약)를 바탕으로, 리포트 근거(RAG)가 있으면 검증/해석하고 없으면 한계를 명확히 말한다.
+목표: 시스템이 제공한 예측 수치(Prophet 결과 요약)를 바탕으로, 리포트 근거(RAG)를 사용해 전문적인 분석 리포트를 작성한다.
 
 [절대 규칙]
-- 아래에 제공된 숫자 외에 새로운 수치(예: 임의의 보정값, 임의의 ±범위)를 만들어내지 마라.
-- "보정"은 수치 변경이 아니라, 해석/검증/주의사항 정리로 수행한다.
-- 리포트 근거가 없으면 "근거 부족"을 명확히 표기하라.
+1. **정체성 확립**: 현재 SKU({sku})는 품목: **{item_name}**, 품종: **{variety_name}**이다.
+2. **시점 연결(Bridging)**: 제공된 리포트는 주로 전년 말(12월 등) 자료다. **"12월 리포트에서 전망한 수급 기조가 2026년 상반기에도 이어질 예정"**이라는 관점을 명시적으로 포함하여 해석하라. (예: "12월 전망에 따르면 상반기에도 ~한 추세가 지속될 것으로 보임")
+3. **직접 해석**: 리포트에서 해당 품종/품목에 대한 내용이 나오면 "SKU가 ~일 경우" 같은 가정법을 쓰지 말고, "SKU {sku}({item_name})의 경우 리포트에 따르면..."과 같이 직접적으로 기술하라.
+4. **숫자 고정**: 제공된 수치를 절대 변경하거나 임의의 보정값을 산출하지 마라. "해석"만 수행한다.
+5. **리포트 연관성**: 리포트의 수급 전망을 이 SKU의 결과와 적극적으로 연결하라.
 
 [시스템 제공 입력(수정 금지)]
 - SKU: {sku}
+- 품목명: {item_name}
+- 품종명: {variety_name}
 - 월별 예측치: {monthly_rows}
 - 합계: {total}
 - 평균: {avg}
@@ -170,8 +174,8 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
 ## 📊 예측 해석 보고서
 
 **[1) 요약]**
-- SKU: {sku}
-- 핵심 결론: 2~3문장 (리포트 근거 있으면 반영, 없으면 한계 명시)
+- 대상: {sku} ({item_name} {variety_name})
+- 핵심 결론: 2~3문장 (리포트의 수급 기조와 예측 수치 패턴을 통합하여 서술)
 
 **[2) 수치 요약(시스템 숫자 기반)]**
 - 합계: {total}
@@ -187,12 +191,21 @@ def generate_description(intent, forecast_data: dict | None = None, market_conte
 **[4) 리스크 & 실행 제안 3가지]**
 - 리스크 2개(근거 기반)
 - 실행 제안 1개(재고/발주/프로모션 중 택1)
+
+**[5) 월별 상세 예측]**
+- 시스템이 제공한 '월별 예측치({monthly_rows})'를 바탕으로 아래 표를 작성하라.
+| 월 | 예측수량 |
+|---|---|
+| (월) | (수량) |
+...
 """
             )
 
             chain = prompt | llm | StrOutputParser()
             return chain.invoke({
                 "sku": sku,
+                "item_name": forecast_data.get("item_name", "알 수 없음"),
+                "variety_name": forecast_data.get("variety_name", "전체"),
                 "monthly_rows": stats["rows"],
                 "total": stats["total"],
                 "avg": stats["avg"],

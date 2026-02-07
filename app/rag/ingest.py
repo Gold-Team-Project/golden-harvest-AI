@@ -270,12 +270,23 @@ async def ingest_pdf_report(
         if force:
             delete_vectors_by_doc_id(collection_name, doc_id)
 
+        print(f"   [Ingest] Loading PDF: {file_path}")
         loader = PyPDFLoader(file_path)
         raw_documents = loader.load()
+        print(f"   [Ingest] Loaded {len(raw_documents)} pages.")
+
+        if not raw_documents:
+            print(f"   ⚠️ [Ingest] No text extracted from {file_name}. Check if PDF is image-only or pypdf is installed.")
 
         splits = build_chunks_from_pages(raw_documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        ingested_at = datetime.utcnow().isoformat()
+        print(f"   [Ingest] Generated {len(splits)} chunks.")
 
+        if splits:
+            sample_text = splits[0].page_content[:100].replace('\n', ' ')
+            print(f"   [Ingest] Sample chunk: {sample_text}...")
+
+        ingested_at = datetime.utcnow().isoformat()
+        # ... (tagging logic) ...
         for d in splits:
             text_ = d.page_content or ""
             item_tags = detect_item_tags(text_, item_aliases)
@@ -291,13 +302,18 @@ async def ingest_pdf_report(
             d.metadata["item_tags"] = item_tags
             d.metadata["variety_tags"] = variety_tags
 
-        PGVector.from_documents(
-            embedding=embeddings,
-            documents=splits,
-            collection_name=collection_name,
-            connection=DB_CONNECTION,
-            use_jsonb=True,
-        )
+        if splits:
+            print(f"   [Ingest] Storing vectors in collection '{collection_name}'...")
+            PGVector.from_documents(
+                embedding=embeddings,
+                documents=splits,
+                collection_name=collection_name,
+                connection=DB_CONNECTION,
+                use_jsonb=True,
+            )
+            print("   [Ingest] Storing vectors completed.")
+        else:
+            print("   ⚠️ [Ingest] No chunks to store.")
 
         registry_upsert_success(
             collection_name=collection_name,
