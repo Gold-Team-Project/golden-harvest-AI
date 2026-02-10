@@ -5,7 +5,7 @@ import redis
 import tempfile
 import glob
 import logging
-import base64  # [추가] 바이너리 데이터 처리를 위해 필요
+import base64
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
@@ -33,11 +33,11 @@ from app.config import llm
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Redis 설정
 REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
-# Redis 설정
 redis_client = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
@@ -45,22 +45,17 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-
-# [수정] DOCUMENT_STORE 딕셔너리(메모리)를 제거하고 Redis를 사용합니다.
-
 # -----------------------------
 # Lifespan
 # -----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # [1단계] 서버 시작 시 테이블 자동 생성
     try:
         init_registry_table()
         logger.info("✅ [DB Init] RAG 레지스트리 테이블 확인/생성 완료.")
     except Exception as e:
         logger.error(f"❌ [DB Init] 테이블 생성 실패: {e}")
 
-    # [2단계] seeds 데이터 학습
     current_dir = os.path.dirname(os.path.abspath(__file__))
     seed_dir_candidate_1 = "/app/seeds"
     seed_dir_candidate_2 = os.path.join(current_dir, "seeds")
@@ -140,11 +135,10 @@ def get_last_forecast(session_id: str) -> Optional[dict]:
             return None
     return None
 
-
-# [신규] 파일 데이터를 Redis에 임시 저장하는 헬퍼
+# [신규] 파일 데이터를 Redis에 임시 저장 (중앙 저장소 활용)
 def save_doc_to_redis(doc_id: str, doc_data: dict):
     key = f"doc_store:{doc_id}"
-    # bytes 데이터는 JSON 저장이 안 되므로 base64 인코딩 처리
+    # bytes 데이터는 base64 인코딩 처리
     serializable_data = {
         "filename": doc_data["filename"],
         "mime_type": doc_data["mime_type"],
@@ -246,20 +240,20 @@ async def chat_endpoint(request: ChatRequest):
     elif isinstance(intent, DocumentIntent):
         doc = create_document(intent)
 
-        # [수정] 메모리가 아닌 Redis 중앙 저장소에 저장
+        # [수정] 메모리(DOCUMENT_STORE) 대신 Redis에 저장 (서버 분산 환경 대응)
         save_doc_to_redis(doc["document_id"], doc)
 
         ai_response_message = generate_description(intent)
 
-        # [중요 수정] localhost 주소가 포함된 URL 대신 상대 경로를 반환합니다.
-        # 프론트엔드 API baseURL(/api)과 결합되어 정상적으로 호출됩니다.
-        relative_url = f"/documents/{doc['document_id']}/download"
+        # [중요 수정] Gateway의 Prefix 규칙(api/ai)에 맞춰 경로를 설정합니다.
+        # 프론트 baseURL(/api) + 여기서 준 경로(ai/...) = /api/ai/documents/... 가 최종 호출됩니다.
+        relative_url = f"ai/documents/{doc['document_id']}/download"
 
         response_data = {
             "type": "DOCUMENT",
             "message": ai_response_message,
             "document_id": doc["document_id"],
-            "download_url": relative_url,
+            "download_url": relative_url, # ai/ 접두사 추가
             "mime_type": doc["mime_type"]
         }
 
@@ -302,10 +296,10 @@ async def chat_endpoint(request: ChatRequest):
         save_chat_to_redis(session_id, user_message, ai_response_message)
     return response_data
 
-
+# [주의] Gateway가 /api/ai/documents를 /documents로 Rewrite하므로 백엔드 경로는 /documents를 유지합니다.
 @app.get("/documents/{doc_id}/download")
 def download_document(doc_id: str):
-    # [수정] Redis에서 데이터를 조회합니다.
+    # [수정] Redis에서 데이터를 조회 (서버 인스턴스가 달라도 공유됨)
     key = f"doc_store:{doc_id}"
     raw_data = redis_client.get(key)
 
