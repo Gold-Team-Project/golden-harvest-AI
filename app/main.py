@@ -1,4 +1,3 @@
-# app/main.py
 import os
 import urllib.parse
 import json
@@ -6,6 +5,7 @@ import redis
 import tempfile
 import glob
 import logging
+import base64  # [추가] 바이너리 데이터 처리를 위해 필요
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
@@ -26,7 +26,7 @@ from app.forecast.services.demand_forecast_service import run_demand_forecast
 from app.forecast.routers.forecast_router import router as forecast_router
 from app.rag.service import get_expert_insight, search_general_reports
 
-# ✅ [추가] init_registry_table import 확인
+# ✅ init_registry_table import 확인
 from app.rag.ingest import ingest_pdf_report, init_registry_table
 from app.config import llm
 
@@ -37,6 +37,7 @@ REDIS_HOST = os.getenv("REDIS_HOST")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
+# Redis 설정
 redis_client = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
@@ -44,15 +45,15 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-DOCUMENT_STORE = {}
 
+# [수정] DOCUMENT_STORE 딕셔너리(메모리)를 제거하고 Redis를 사용합니다.
 
 # -----------------------------
 # Lifespan
 # -----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ✅ [1단계] 서버 시작 시 테이블 자동 생성 (동기 함수지만 1회성이라 바로 호출)
+    # [1단계] 서버 시작 시 테이블 자동 생성
     try:
         init_registry_table()
         logger.info("✅ [DB Init] RAG 레지스트리 테이블 확인/생성 완료.")
@@ -67,15 +68,11 @@ async def lifespan(app: FastAPI):
 
     if os.path.exists(seed_dir):
         pdf_files = glob.glob(os.path.join(seed_dir, "*.pdf"))
-
         if pdf_files:
             logger.info(f"🌱 [초기 데이터] {len(pdf_files)}개의 파일을 발견했습니다. 학습을 시작합니다...")
-
             for pdf_path in pdf_files:
                 filename = os.path.basename(pdf_path)
                 try:
-                    logger.info(f"   Targeting: {filename}")
-
                     await ingest_pdf_report(
                         file_path=pdf_path,
                         category="기본자료",
@@ -83,17 +80,10 @@ async def lifespan(app: FastAPI):
                         source="System_Seed",
                         force=True
                     )
-
                     logger.info(f"   ✅ 완료: {filename}")
                 except Exception as e:
                     logger.error(f"   ❌ 실패: {filename} - {str(e)}")
-
             logger.info("✨ [초기 데이터] 모든 시드 데이터 학습 완료!")
-        else:
-            logger.info(f"ℹ️ '{seed_dir}' 폴더가 비어있습니다. 초기 학습을 건너뜁니다.")
-    else:
-        logger.warning(f"⚠️ seeds 폴더를 찾을 수 없습니다.")
-
     yield
     pass
 
@@ -108,7 +98,7 @@ class ChatRequest(BaseModel):
 
 
 # -----------------------------
-# Redis Helper
+# Redis Helpers
 # -----------------------------
 def get_chat_history(session_id: str, limit: int = 10) -> List:
     key = f"chat_history:{session_id}"
@@ -149,6 +139,19 @@ def get_last_forecast(session_id: str) -> Optional[dict]:
         except Exception:
             return None
     return None
+
+
+# [신규] 파일 데이터를 Redis에 임시 저장하는 헬퍼
+def save_doc_to_redis(doc_id: str, doc_data: dict):
+    key = f"doc_store:{doc_id}"
+    # bytes 데이터는 JSON 저장이 안 되므로 base64 인코딩 처리
+    serializable_data = {
+        "filename": doc_data["filename"],
+        "mime_type": doc_data["mime_type"],
+        "content": base64.b64encode(doc_data["content"]).decode('utf-8')
+    }
+    redis_client.set(key, json.dumps(serializable_data))
+    redis_client.expire(key, 1800)  # 30분 후 자동 파기
 
 
 # -----------------------------
@@ -193,7 +196,6 @@ async def rag_ingest_pdf(
 async def chat_endpoint(request: ChatRequest):
     session_id = request.session_id
     user_message = request.message
-
     intent = parse_intent(user_message)
 
     if isinstance(intent, ForecastIntent):
@@ -210,7 +212,6 @@ async def chat_endpoint(request: ChatRequest):
             for row in forecast_result.get("forecast", [])
         ]
 
-        # [개선] SKU 정보를 먼저 조회하여 AI에게 정확한 품목명을 전달
         from app.rag.service import resolve_sku_to_item_and_variety
         item_name, variety_name, _, _ = await resolve_sku_to_item_and_variety(intent.skuNo)
 
@@ -221,11 +222,7 @@ async def chat_endpoint(request: ChatRequest):
         except Exception:
             query_month = None
 
-        rag_context = await get_expert_insight(
-            sku_no=intent.skuNo,
-            query_month=query_month,
-            query_period=None
-        )
+        rag_context = await get_expert_insight(sku_no=intent.skuNo, query_month=query_month, query_period=None)
         if not rag_context:
             rag_context = "관련된 시장 리포트가 발견되지 않았습니다."
 
@@ -248,19 +245,26 @@ async def chat_endpoint(request: ChatRequest):
 
     elif isinstance(intent, DocumentIntent):
         doc = create_document(intent)
-        DOCUMENT_STORE[doc["document_id"]] = doc
+
+        # [수정] 메모리가 아닌 Redis 중앙 저장소에 저장
+        save_doc_to_redis(doc["document_id"], doc)
+
         ai_response_message = generate_description(intent)
+
+        # [중요 수정] localhost 주소가 포함된 URL 대신 상대 경로를 반환합니다.
+        # 프론트엔드 API baseURL(/api)과 결합되어 정상적으로 호출됩니다.
+        relative_url = f"/documents/{doc['document_id']}/download"
+
         response_data = {
             "type": "DOCUMENT",
             "message": ai_response_message,
             "document_id": doc["document_id"],
-            "download_url": doc["download_url"],
+            "download_url": relative_url,
             "mime_type": doc["mime_type"]
         }
 
     else:
-        # [RAG 검색 개선]
-        # 1. 사용자 질문에서 품목명 추출 시도 (간이 로직)
+        # RAG 검색 로직 (기존 유지)
         target_item = None
         for fruit in ["사과", "배", "포도", "감귤", "딸기", "샤인머스캣", "복숭아"]:
             if fruit in user_message:
@@ -268,85 +272,52 @@ async def chat_endpoint(request: ChatRequest):
                 break
 
         rag_context = ""
-
-        # 2. 품목명이 있으면 해당 품목 태그로 우선 검색
         if target_item:
-            print(f"🔍 품목 감지됨: {target_item} -> 태그 필터 검색 시도")
-            # 2-1. 태그 필터 검색
             rag_context = search_general_reports(f"{target_item} 전망 생산량 가격", k=5, item_tag=target_item)
-
-            # 2-2. 태그로 안 나오면, 쿼리에 품목명 넣어서 태그 없이 검색 (본문 검색 유도)
             if not rag_context:
-                print(f"⚠️ 태그 검색 실패 -> 텍스트 검색 시도(확장): {target_item}")
-                # k값을 8로 늘려 더 많은 문서를 탐색
                 rag_context = search_general_reports(f"{target_item} 농업관측 전망 수급 동향", k=8)
-
-        # 3. 품목명이 없거나 검색 실패 시, 기존 방식(쿼리 확장) 사용
         if not rag_context:
             search_query = f"{user_message} 농업관측 전망 생산량 가격 수급"
             rag_context = search_general_reports(search_query, k=5)
-
-        # 4. 최후의 보루: 전체 리포트 검색
         if not rag_context:
             rag_context = search_general_reports("농업관측 월보 전망", k=5)
 
         history_messages = get_chat_history(session_id)
         current_msg_obj = HumanMessage(content=user_message)
 
-        # 5. 시스템 프롬프트 강화
         if rag_context:
             system_prompt = (
-                f"당신은 농산물 시장 분석 전문가입니다. 아래 [참고 문서]를 철저히 분석하여 답변하세요.\n"
-                f"사용자가 특정 품목(예: {target_item or '과일'})을 물어봤다면, 문서 내 해당 품목 관련 내용을 모두 찾아 상세히 설명해야 합니다.\n"
-                f"문서에 있는 수치(생산량, 면적 등)를 인용할 때는 '문서에 따르면...'이라고 언급하세요.\n\n"
-                f"만약 문서에 해당 품목에 대한 직접적인 언급이 부족하더라도, 과일 전체의 동향이나 연관 품목의 정보를 바탕으로 합리적인 추론을 제공하세요.\n\n"
-                f"[참고 문서]\n{rag_context}\n\n"
-                f"답변 시 주의사항:\n"
-                f"- 문서 내용을 최우선으로 하되, 내용이 부족하면 '문서에 직접적인 내용은 없으나...'라고 밝히고 연관 정보를 설명하세요.\n"
-                f"- 추측성 답변보다는 문서에 근거한 사실 위주로 답변하세요."
+                f"당신은 농산물 시장 분석 전문가입니다. 아래 [참고 문서]를 분석하여 답변하세요.\n"
+                f"[참고 문서]\n{rag_context}\n"
             )
             messages_to_send = [SystemMessage(content=system_prompt)] + history_messages + [current_msg_obj]
-            ai_response = llm.invoke(messages_to_send)
-            ai_response_message = ai_response.content
         else:
-            last_forecast_info = get_last_forecast(session_id)
-            is_followup = any(k in user_message for k in ["왜", "이유", "근거", "설명"])
+            messages_to_send = history_messages + [current_msg_obj]
 
-            if is_followup and last_forecast_info:
-                last_sku = last_forecast_info.get("sku")
-                last_data = last_forecast_info.get("data")
-                context_msg = SystemMessage(
-                    content=(
-                        f"참고: 사용자는 방금 '{last_sku}' 상품의 예측 결과 데이터를 조회했습니다.\n"
-                        f"데이터: {last_data}\n"
-                        f"이 데이터를 기반으로 사용자의 질문에 답변하세요."
-                    )
-                )
-                messages_to_send = history_messages + [context_msg, current_msg_obj]
-            else:
-                messages_to_send = history_messages + [current_msg_obj]
-
-            ai_response = llm.invoke(messages_to_send)
-            ai_response_message = ai_response.content
-
-        response_data = {
-            "type": "CHAT",
-            "message": ai_response_message
-        }
+        ai_response = llm.invoke(messages_to_send)
+        ai_response_message = ai_response.content
+        response_data = {"type": "CHAT", "message": ai_response_message}
 
     if ai_response_message:
         save_chat_to_redis(session_id, user_message, ai_response_message)
-
     return response_data
 
 
 @app.get("/documents/{doc_id}/download")
 def download_document(doc_id: str):
-    file_data = DOCUMENT_STORE.get(doc_id)
-    if not file_data:
-        raise HTTPException(status_code=404, detail="document not found")
+    # [수정] Redis에서 데이터를 조회합니다.
+    key = f"doc_store:{doc_id}"
+    raw_data = redis_client.get(key)
+
+    if not raw_data:
+        raise HTTPException(status_code=404, detail="파일이 존재하지 않거나 만료되었습니다.")
+
+    file_data = json.loads(raw_data)
+    # base64 문자열을 다시 바이너리(bytes)로 복원
+    content = base64.b64decode(file_data["content"])
+
     return Response(
-        content=file_data["content"],
+        content=content,
         media_type=file_data["mime_type"],
         headers={
             "Content-Disposition":
